@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Sandbox MUST be disabled: CGVirtualDisplay (private API),
+	     IOHIDUserDevice, and raw socket/ADB operations require it. -->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+
+	<!-- Required to create the virtual HID graphics tablet. -->
+	<key>com.apple.security.device.usb</key>
+	<true/>
+
+	<!-- Audio capture support. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>
