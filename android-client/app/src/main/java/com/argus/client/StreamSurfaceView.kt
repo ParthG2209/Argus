@@ -25,7 +25,17 @@ class StreamSurfaceView @JvmOverloads constructor(
     var onSurfaceReady: ((Surface) -> Unit)? = null
     var onSurfaceDestroyed: (() -> Unit)? = null
 
-    private val streamAspect = 2732f / 2048f
+    // Stream aspect ratio; set from the detected panel resolution so the
+    // SurfaceView fills the screen exactly (no letterboxing when they match).
+    private var streamAspect = 2732f / 2048f
+
+    /** Set the stream aspect from the tablet's real pixel resolution. */
+    fun setStreamAspect(width: Int, height: Int) {
+        if (width > 0 && height > 0) {
+            streamAspect = width.toFloat() / height.toFloat()
+            requestLayout()
+        }
+    }
 
     init {
         holder.addCallback(this)
@@ -51,8 +61,12 @@ class StreamSurfaceView @JvmOverloads constructor(
     // MARK: - Surface lifecycle
 
     override fun surfaceCreated(holder: SurfaceHolder) {
+        // Hint the panel to run at its highest refresh so high-fps streams
+        // display smoothly (the source rate is variable, so SEAMLESS is fine).
+        val maxRate = display?.supportedModes?.maxOfOrNull { it.refreshRate }
+            ?: display?.refreshRate ?: 60f
         runCatching {
-            holder.surface.setFrameRate(60f, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+            holder.surface.setFrameRate(maxRate, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
         }
         onSurfaceReady?.invoke(holder.surface)
     }
