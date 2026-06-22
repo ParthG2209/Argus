@@ -1,0 +1,65 @@
+# XcodeGen project spec for the Argus macOS host.
+#
+# Generate the .xcodeproj with:
+#     brew install xcodegen
+#     cd mac-host && xcodegen generate
+# then open Argus.xcodeproj in Xcode 15+, select your local signing team,
+# build & run.
+
+name: Argus
+options:
+  bundleIdPrefix: com.argus
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    CODE_SIGN_STYLE: Automatic
+    # Disable the App Sandbox — required for CGVirtualDisplay (private API),
+    # IOHIDUserDevice, and raw ADB/socket operations.
+    ENABLE_APP_SANDBOX: NO
+    SWIFT_OBJC_BRIDGING_HEADER: Argus/Argus-Bridging-Header.h
+    CLANG_ENABLE_MODULES: YES
+    GCC_ENABLE_OBJC_EXCEPTIONS: YES
+
+targets:
+  Argus:
+    type: application
+    platform: macOS
+    sources:
+      - path: Argus
+    info:
+      path: Argus/Info.plist
+      properties:
+        CFBundleName: Argus
+        CFBundleDisplayName: Argus
+        CFBundleIdentifier: com.argus.host
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        LSUIElement: true
+        LSMinimumSystemVersion: "13.0"
+        NSScreenCaptureUsageDescription: >-
+          Argus captures the Argus virtual display to stream it to your tablet.
+        NSHumanReadableCopyright: "Argus"
+    entitlements:
+      path: Argus/Argus.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.device.usb: true
+        com.apple.security.device.audio-input: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.argus.host
+        INFOPLIST_KEY_LSUIElement: YES
+    dependencies:
+      - sdk: CoreGraphics.framework
+      - sdk: ScreenCaptureKit.framework
+      - sdk: VideoToolbox.framework
+      - sdk: CoreMedia.framework
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: IOKit.framework
+      - sdk: AppKit.framework
