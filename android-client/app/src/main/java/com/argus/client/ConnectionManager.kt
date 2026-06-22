@@ -23,6 +23,9 @@ class ConnectionManager(
     private val videoDecoder: VideoDecoder,
     private val audioPlayer: AudioPlayer,
     private val inputForwarder: InputForwarder,
+    private val screenWidth: Int,
+    private val screenHeight: Int,
+    private val screenRefresh: Int,
 ) {
     enum class Status { DISCONNECTED, CONNECTED, STREAMING }
 
@@ -57,9 +60,15 @@ class ConnectionManager(
                 input = connect(Protocol.PORT_INPUT)
                 audio = connect(Protocol.PORT_AUDIO)
 
-                inputForwarder.setOutput(input.getOutputStream())
+                // Report our real resolution FIRST so the Mac sizes the
+                // virtual display to match (newline-terminated JSON).
+                val out = input.getOutputStream()
+                val hello = "{\"type\":\"hello\",\"width\":$screenWidth,\"height\":$screenHeight," +
+                    "\"refresh\":$screenRefresh}\n"
+                out.write(hello.toByteArray(Charsets.UTF_8)); out.flush()
+                inputForwarder.setOutput(out)
                 onStatus?.invoke(Status.CONNECTED)
-                Log.i(TAG, "All sockets connected.")
+                Log.i(TAG, "All sockets connected. Sent hello ${screenWidth}x${screenHeight}@${screenRefresh}")
 
                 coroutineScope {
                     val videoJob = launch { readVideo(video!!) }
@@ -91,9 +100,39 @@ class ConnectionManager(
 
     private suspend fun readVideo(socket: Socket) {
         val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 1 shl 20))
+
+        // The first frame is a codec handshake (['A','R','G', codecByte]).
+        val first = readFrame(input) ?: return
+        val mime = Handshake.mimeOrNull(first)
+        try {
+            if (mime != null) {
+                Log.i(TAG, "Codec handshake: $mime — starting decoder")
+                videoDecoder.start(mime)
+            } else {
+                Log.i(TAG, "No handshake; assuming H.264")
+                videoDecoder.start(Protocol.MIME_H264)
+                if (first.size > 8) {
+                    videoDecoder.submitFrame(first, 8, first.size - 8, readBE64(first, 0))
+                }
+            }
+        } catch (e: Exception) {
+            // Most likely: this device's decoder can't handle the codec/size.
+            Log.e(TAG, "DECODER START FAILED for $mime: ${e.message}", e)
+            throw e
+        }
+
+        var count = 0
+        var bytes = 0L
         while (scope.isActive && active) {
             val frame = readFrame(input) ?: break
-            videoDecoder.submitFrame(frame)
+            // Each frame = [8-byte BE capture-µs][Annex B NAL].
+            if (frame.size <= 8) continue
+            val ptsUs = readBE64(frame, 0)
+            videoDecoder.submitFrame(frame, 8, frame.size - 8, ptsUs)
+            count++; bytes += frame.size
+            if (count <= 3 || count % 240 == 0) {
+                Log.i(TAG, "video frames received=$count, lastSize=${frame.size}, total=${bytes}B")
+            }
         }
         Log.i(TAG, "Video stream ended.")
     }
