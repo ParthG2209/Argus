@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Xcode / XcodeGen generated
+mac-host/Argus.xcodeproj/
+mac-host/*.xcworkspace/
+mac-host/DerivedData/
+mac-host/build/
+*.xcuserstate
+xcuserdata/
+
+# Android / Gradle
+android-client/.gradle/
+android-client/build/
+android-client/app/build/
+android-client/local.properties
+android-client/.idea/
+android-client/captures/
+*.apk
+*.iml
