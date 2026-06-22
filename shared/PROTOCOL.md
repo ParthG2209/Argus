@@ -41,14 +41,23 @@ Every payload is prefixed with its length:
 ```
 
 - The length field counts only the payload bytes, not the 4-byte header.
-- For **video** (7175), each payload is one H.264 access unit / NAL grouping
-  in **Annex B** form. The encoder emits raw NAL units; on the wire each
-  frame is the concatenation of its NAL units, each internally still using
-  Annex B start codes (`00 00 00 01`). The 4-byte length prefix wraps the
-  whole frame so the receiver can read exactly one frame at a time.
-- The very first video payloads sent on a fresh connection are the **SPS**
-  and **PPS** parameter sets, followed by an IDR (keyframe), so the decoder
-  can configure itself before any P-frames arrive.
+- For **video** (7175), each payload is `[8-byte big-endian int64 capture
+  timestamp µs][access unit]`. The access unit is one H.264 **or H.265 (HEVC)**
+  NAL grouping in **Annex B** form (NALs concatenated, each with `00 00 00 01`
+  start codes). The 4-byte length prefix counts the 8-byte timestamp **plus**
+  the access unit. The timestamp is the Mac's ScreenCaptureKit capture time;
+  the tablet uses it to pace presentation (`releaseOutputBuffer` at a clock-
+  mapped vsync time) for smooth motion independent of arrival jitter. Only
+  timestamp *differences* matter, so the absolute epoch is unspecified.
+- **Codec handshake:** the very first framed payload on a fresh video
+  connection is a 4-byte handshake — ASCII `A R G` followed by a codec byte
+  (`0` = H.264, `1` = H.265). It has **no** timestamp prefix. The client reads
+  this first frame specially; every payload after it is a timestamped video
+  frame as described above. The client configures its decoder from this byte
+  before reading any frames.
+- After the handshake, the Mac sends the parameter sets (H.264: **SPS/PPS**;
+  HEVC: **VPS/SPS/PPS**) inlined ahead of the first IDR (keyframe), so the
+  decoder configures itself before any P-frames arrive.
 - For **audio** (7177), each payload is one raw AAC (AAC-LC, ADTS-less /
   raw) access unit. The decoder is configured from an out-of-band
   `csd-0` derived from the stream's sample rate / channel count (48 kHz,
@@ -73,6 +82,23 @@ guarantee a frame arrives in a single `recv`.
 Tablet → Mac. UTF-8 JSON objects, **one per line**, each terminated by a
 single `\n` (`0x0A`). The Mac reads line-by-line and parses each line as an
 independent message.
+
+### 3.0 Hello (resolution handshake)
+
+The **first** line the tablet sends is a hello carrying its real panel
+resolution (landscape pixels) and refresh rate, so the Mac sizes the virtual
+display + encoder to match (filling the panel with no letterboxing) and picks
+a content frame rate that's a clean integer divisor of the panel refresh:
+
+```json
+{ "type": "hello", "width": 2880, "height": 1800, "refresh": 144 }
+```
+
+`refresh` is optional (older clients omit it; the Mac defaults to 144).
+
+The Mac waits for this before creating the virtual display (falling back to a
+default size after a short timeout if it never arrives). All subsequent lines
+are input events (below); they have no `type` field.
 
 ### 3.1 Message schema
 
@@ -158,9 +184,13 @@ logical ranges (`x,y → 0..32767`, `pressure → 0..1023`).
 
 1. Mac creates the virtual display and starts listeners on 7175, 7176, 7177.
 2. Mac runs the three `adb reverse` commands.
-3. Android connects to all three ports (retry every 2 s until connected).
-4. On the first **video** connection, the Mac immediately sends SPS + PPS,
-   then forces an IDR keyframe, so the decoder configures before P-frames.
+3. Android connects to all three ports (retry every 2 s until connected) and
+   immediately sends the **hello** (its resolution) on the input socket.
+4. The Mac reads the hello and creates the virtual display + encoder sized to
+   the tablet, then starts capturing.
+5. On the **video** connection, the Mac sends the 4-byte codec handshake,
+   then the parameter sets, then forces an IDR keyframe, so the decoder
+   configures before P-frames.
 5. Audio config (sample rate 48000, 2 channels, AAC-LC) is fixed by this
    spec; the client builds `csd-0` from those constants. The first audio
    payload is a normal AAC access unit.
