@@ -11,6 +11,7 @@
 
 import Foundation
 import Darwin
+import os
 
 private func makeListeningSocket(port: UInt16) -> Int32? {
     let fd = socket(AF_INET, SOCK_STREAM, 0)
@@ -71,14 +72,31 @@ final class FrameSocketServer {
     private let writeQueue: DispatchQueue
     private var running = false
 
-    /// Called when a client connects (first connect triggers SPS/PPS send).
+    // Backpressure: cap frames in flight on the write queue. When USB can't
+    // drain fast enough (heavy full-screen motion), drop new frames instead of
+    // queuing them — queuing would grow latency without bound. 0 = unlimited.
+    private let maxInFlight: Int
+    private let inFlight = OSAllocatedUnfairLock(initialState: 0)
+
+    /// Optional frame written to the socket FIRST, synchronously, before the
+    /// client is exposed to other senders — guarantees it precedes all other
+    /// frames (used for the codec handshake on the video stream).
+    var connectFrame: (() -> Data)?
+
+    /// Called when a client connects (after the connect frame is written).
     var onClientConnected: (() -> Void)?
     var onClientDisconnected: (() -> Void)?
+    /// Called when a frame is dropped due to backpressure (maxInFlight).
+    var onFrameDropped: (() -> Void)?
 
-    init(port: UInt16, label: String) {
+    /// - Parameter maxInFlight: max queued frames before dropping (0 = no cap).
+    ///   Use a small value for video (drop to stay current); 0 for audio.
+    init(port: UInt16, label: String, maxInFlight: Int = 0) {
         self.port = port
+        self.maxInFlight = maxInFlight
         self.acceptQueue = DispatchQueue(label: "com.argus.\(label).accept")
-        self.writeQueue = DispatchQueue(label: "com.argus.\(label).write")
+        self.writeQueue = DispatchQueue(label: "com.argus.\(label).write",
+                                        qos: .userInteractive)
     }
 
     var hasClient: Bool { clientFD >= 0 }
@@ -105,16 +123,41 @@ final class FrameSocketServer {
             var yes: Int32 = 1
             setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, socklen_t(MemoryLayout<Int32>.size))
             setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
+
+            // Write the connect frame (codec handshake) BEFORE exposing the
+            // socket via clientFD, so no video frame can race ahead of it.
+            if let payload = connectFrame?() {
+                var header = UInt32(payload.count).bigEndian
+                var packet = Data(bytes: &header, count: 4)
+                packet.append(payload)
+                _ = writeAll(fd, packet)
+            }
+
             clientFD = fd
             NSLog("[Argus] FrameSocketServer(\(port)) client connected.")
             onClientConnected?()
         }
     }
 
-    /// Send one length-prefixed frame.
+    /// Send one length-prefixed frame. Drops the frame if the write queue is
+    /// already saturated (see maxInFlight).
     func send(frame: Data) {
+        if maxInFlight > 0 {
+            let drop = inFlight.withLock { count -> Bool in
+                if count >= maxInFlight { return true }
+                count += 1
+                return false
+            }
+            if drop {
+                onFrameDropped?()  // ask the encoder for a recovery keyframe
+                return             // USB backed up — skip this frame to stay live
+            }
+        }
+
         writeQueue.async { [weak self] in
-            guard let self, self.clientFD >= 0 else { return }
+            guard let self else { return }
+            defer { if self.maxInFlight > 0 { self.inFlight.withLock { $0 -= 1 } } }
+            guard self.clientFD >= 0 else { return }
             var header = UInt32(frame.count).bigEndian
             var packet = Data(bytes: &header, count: 4)
             packet.append(frame)
