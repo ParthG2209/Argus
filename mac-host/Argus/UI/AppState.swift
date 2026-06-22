@@ -18,15 +18,28 @@ final class AppState: ObservableObject {
     @Published var inputMode: InputMode = .none
     @Published var stylusPressure: Double = 0.0
 
+    // Auto-detected tablet resolution + panel refresh (set when streaming begins).
+    @Published var tabletWidth: Int = ArgusDisplaySpec.fallbackWidth
+    @Published var tabletHeight: Int = ArgusDisplaySpec.fallbackHeight
+    @Published var tabletRefresh: Int = 144
+
+    /// Effective content frame rate = panel refresh / divisor. Must be an integer
+    /// divisor so each frame shows for a whole number of refreshes (smooth).
+    var effectiveFrameRate: Int { max(24, tabletRefresh / max(1, refreshDivisor)) }
+
     // Environment checks
     @Published var adbAvailable: Bool = true
     @Published var adbPath: String = "adb"
     @Published var lastError: String?
 
     // Settings (persisted)
-    @AppStorage("resolutionPreset") var resolutionPreset: String = "2732x2048"
+    @AppStorage("scalingPreset") var scalingPreset: String = "Default"
     @AppStorage("bitrateMbpsSetting") var bitrateSetting: Double = 15.0
-    @AppStorage("codec") var codec: String = "H.264"
+    @AppStorage("codec") var codec: String = "H.265"
+    // Content frame rate as panel-refresh ÷ divisor (1 = full, 2 = half, 3 = third).
+    // Default Full: frame pacing on the tablet keeps it smooth at max fps. Drop
+    // to Half (a perfect divisor) only if Full still judders.
+    @AppStorage("refreshDivisor") var refreshDivisor: Int = 1
     @AppStorage("enablePressure") var enablePressure: Bool = true
     @AppStorage("enableTilt") var enableTilt: Bool = true
     @AppStorage("enableHover") var enableHover: Bool = true
