@@ -146,8 +146,10 @@ and current pressure — handy for confirming the pen is detected correctly.
 
 ## Known limitations (Phase 1)
 
-- **60 Hz** refresh (Phase 2 will explore 120 Hz via a Sunshine/Moonlight-
-  style path and ScreenCaptureKit rate unlocking).
+- **Refresh rate** is selectable (60/90/120/144 Hz) in Settings. The actual
+  delivered rate depends on what ScreenCaptureKit will emit for a virtual
+  display and what the hardware encoder can sustain at the chosen resolution —
+  if the HUD FPS can't reach the target at full res, drop to 120 or 60.
 - **Single touch point** for finger input (multi-touch in Phase 3 via a
   multitouch digitizer HID descriptor — stubbed in `InputInjector.swift`).
 - Stylus hover works but requires the client app to be **foreground** on the
