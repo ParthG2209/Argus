@@ -2,29 +2,39 @@
 //  ScreenCaptureManager.swift
 //  Argus
 //
-//  Captures the virtual display with ScreenCaptureKit at 60fps and delivers
-//  NV12 CVPixelBuffers to a delegate on a high-priority queue.
+//  Captures the virtual display with a SINGLE ScreenCaptureKit stream that
+//  carries both video and audio. (Phase 1 used a second stream for audio,
+//  which produced orphan video frames with no registered output — the source
+//  of the "stream output NOT found. Dropping frame" spam.)
+//
+//  Frames are delivered via closures on dedicated serial queues; nothing on
+//  this path touches the main actor.
 //
 
 import Foundation
 import ScreenCaptureKit
 import CoreMedia
 
-protocol ScreenCaptureDelegate: AnyObject {
-    func didCapture(pixelBuffer: CVPixelBuffer, pts: CMTime)
-}
-
 final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
-    weak var delegate: ScreenCaptureDelegate?
+    /// Called on the serial video queue with each complete NV12 frame.
+    var onVideoFrame: ((CVPixelBuffer, CMTime) -> Void)?
+    /// Called on the serial audio queue with each PCM audio sample buffer.
+    var onAudioSample: ((CMSampleBuffer) -> Void)?
 
     private var stream: SCStream?
-    private let captureQueue = DispatchQueue(label: "com.argus.capture",
-                                             qos: .userInteractive,
-                                             attributes: .concurrent)
-    private let targetDisplayID: CGDirectDisplayID
+    private let videoQueue = DispatchQueue(label: "com.argus.capture.video", qos: .userInteractive)
+    private let audioQueue = DispatchQueue(label: "com.argus.capture.audio", qos: .userInitiated)
 
-    init(displayID: CGDirectDisplayID) {
+    private let targetDisplayID: CGDirectDisplayID
+    private let captureWidth: Int
+    private let captureHeight: Int
+    private let frameRate: Int
+
+    init(displayID: CGDirectDisplayID, width: Int, height: Int, frameRate: Int) {
         self.targetDisplayID = displayID
+        self.captureWidth = width
+        self.captureHeight = height
+        self.frameRate = frameRate
     }
 
     func start() async throws {
@@ -41,25 +51,33 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         let filter = SCContentFilter(display: scDisplay, excludingWindows: [])
 
         let config = SCStreamConfiguration()
-        // Stream at the tablet's physical resolution. The Mac renders HiDPI
-        // (2x) internally, but we downscale to the panel's native pixels for
-        // transmission efficiency (see README "Known limitations").
-        config.width  = Int(ArgusDisplaySpec.pixelsWide)
-        config.height = Int(ArgusDisplaySpec.pixelsHigh)
+        // Always capture at the tablet's native panel resolution. macOS may be
+        // rendering a larger HiDPI framebuffer (More Space); ScreenCaptureKit
+        // scales it down to these dimensions for transmission.
+        config.width = captureWidth
+        config.height = captureHeight
         config.scalesToFit = true
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(frameRate))
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange // NV12
-        config.queueDepth = 6
+        // Shallow queue: hand frames off immediately, don't let SCK buffer a
+        // backlog (that's latency). We process fast, so 3 is plenty.
+        config.queueDepth = 3
         config.showsCursor = true
         config.colorSpaceName = CGColorSpace.sRGB
 
+        // Audio in the same stream.
+        config.capturesAudio = true
+        config.sampleRate = Int(ArgusAudioSpec.sampleRate)
+        config.channelCount = Int(ArgusAudioSpec.channels)
+        config.excludesCurrentProcessAudio = true
+
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        try stream.addStreamOutput(self, type: .screen,
-                                   sampleHandlerQueue: captureQueue)
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
         try await stream.startCapture()
         self.stream = stream
         NSLog("[Argus] ScreenCaptureKit started on display \(targetDisplayID) "
-              + "(\(config.width)x\(config.height) @60).")
+              + "(\(captureWidth)x\(captureHeight), video+audio).")
     }
 
     func stop() async {
@@ -72,9 +90,18 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                 of type: SCStreamOutputType) {
-        guard type == .screen, sampleBuffer.isValid else { return }
+        guard sampleBuffer.isValid else { return }
+        switch type {
+        case .screen:
+            handleVideo(sampleBuffer)
+        case .audio:
+            onAudioSample?(sampleBuffer)
+        default:
+            break
+        }
+    }
 
-        // Only deliver complete frames.
+    private func handleVideo(_ sampleBuffer: CMSampleBuffer) {
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
                 sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let info = attachments.first,
@@ -83,10 +110,9 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
               frameStatus == .complete else {
             return
         }
-
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        delegate?.didCapture(pixelBuffer: pixelBuffer, pts: pts)
+        onVideoFrame?(pixelBuffer, pts)
     }
 
     // MARK: - SCStreamDelegate
