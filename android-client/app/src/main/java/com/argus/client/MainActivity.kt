@@ -32,6 +32,12 @@ class MainActivity : AppCompatActivity() {
     private val ui = Handler(Looper.getMainLooper())
     private var overlayVisible = true
 
+    // Real panel resolution (landscape), detected at launch and reported to
+    // the Mac so it sizes the virtual display to match (no black bars).
+    private var screenW = 0
+    private var screenH = 0
+    private var screenRefresh = 144   // panel refresh (Hz), for clean-divisor pacing
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -40,6 +46,9 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         hideSystemUi()
 
+        detectScreenSize()
+        selectHighRefreshMode()
+        binding.surfaceView.setStreamAspect(screenW, screenH)
         binding.surfaceView.forwarder = inputForwarder
         binding.surfaceView.onInput = { tool, pressure ->
             lastTool = tool
@@ -59,16 +68,53 @@ class MainActivity : AppCompatActivity() {
 
     private fun onSurfaceReady(surface: Surface) {
         if (decoder != null) return
-        val dec = VideoDecoder(surface)
-        dec.start()
+        // Don't start the decoder yet — ConnectionManager starts it once the
+        // codec handshake (H.264 / H.265) arrives on the video socket.
+        val dec = VideoDecoder(surface, screenW, screenH)
         decoder = dec
 
         audioPlayer.start()
 
-        val conn = ConnectionManager(dec, audioPlayer, inputForwarder)
+        val conn = ConnectionManager(dec, audioPlayer, inputForwarder, screenW, screenH, screenRefresh)
         conn.onStatus = { s -> status = s }
         conn.start()
         connection = conn
+    }
+
+    /** Detect the full panel resolution in landscape (w >= h). */
+    private fun detectScreenSize() {
+        var w: Int
+        var h: Int
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            val bounds = windowManager.currentWindowMetrics.bounds
+            w = bounds.width(); h = bounds.height()
+        } else {
+            val dm = android.util.DisplayMetrics()
+            @Suppress("DEPRECATION") windowManager.defaultDisplay.getRealMetrics(dm)
+            w = dm.widthPixels; h = dm.heightPixels
+        }
+        if (h > w) { val t = w; w = h; h = t }   // force landscape
+        screenW = w; screenH = h
+        android.util.Log.i("ArgusVideo", "Detected panel resolution ${screenW}x${screenH}")
+    }
+
+    /** Ask the system for the highest-refresh display mode (e.g. 144 Hz). */
+    private fun selectHighRefreshMode() {
+        val disp = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) display
+                   else @Suppress("DEPRECATION") windowManager.defaultDisplay
+        val modes = disp?.supportedModes ?: return
+        // Prefer modes at the native resolution; pick the highest refresh.
+        val atNative = modes.filter {
+            (it.physicalWidth == screenW && it.physicalHeight == screenH) ||
+            (it.physicalWidth == screenH && it.physicalHeight == screenW)
+        }
+        val best = (atNative.ifEmpty { modes.toList() }).maxByOrNull { it.refreshRate } ?: return
+        val lp = window.attributes
+        lp.preferredDisplayModeId = best.modeId
+        window.attributes = lp
+        screenRefresh = Math.round(best.refreshRate)
+        android.util.Log.i("ArgusVideo",
+            "Requested display mode ${best.physicalWidth}x${best.physicalHeight}@${best.refreshRate}Hz")
     }
 
     private fun teardownPipeline() {
