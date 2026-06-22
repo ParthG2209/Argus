@@ -15,6 +15,28 @@ object Protocol {
 
     const val AUDIO_SAMPLE_RATE = 48000
     const val AUDIO_CHANNELS = 2
+
+    const val MIME_H264 = "video/avc"
+    const val MIME_H265 = "video/hevc"
+}
+
+/**
+ * The first framed payload on the video socket is a 4-byte handshake:
+ * 'A','R','G', codecByte (0 = H.264, 1 = H.265). Real video frames begin with
+ * an Annex B start code, never "ARG".
+ */
+object Handshake {
+    private val PREFIX = byteArrayOf(0x41, 0x52, 0x47) // "ARG"
+
+    /** Returns the MediaCodec MIME if [frame] is a handshake, else null. */
+    fun mimeOrNull(frame: ByteArray): String? {
+        if (frame.size != 4) return null
+        if (frame[0] != PREFIX[0] || frame[1] != PREFIX[1] || frame[2] != PREFIX[2]) return null
+        return when (frame[3].toInt()) {
+            1 -> Protocol.MIME_H265
+            else -> Protocol.MIME_H264
+        }
+    }
 }
 
 /** One sampled input point in normalized device space. */
@@ -68,6 +90,13 @@ data class InputBatch(
         // Compact fixed precision; avoids locale decimal-comma issues.
         return String.format(java.util.Locale.US, "%.4f", v)
     }
+}
+
+/** Reads a big-endian Int64 from [b] at [offset]. */
+fun readBE64(b: ByteArray, offset: Int): Long {
+    var v = 0L
+    for (i in 0 until 8) v = (v shl 8) or (b[offset + i].toLong() and 0xFF)
+    return v
 }
 
 /**
