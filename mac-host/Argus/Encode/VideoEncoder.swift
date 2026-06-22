@@ -19,14 +19,19 @@ final class VideoEncoder {
     private let width: Int32
     private let height: Int32
     private var bitrate: Int
+    private let codec: VideoCodec
+    private let frameRate: Int
 
     // Annex B start code.
     private static let startCode: [UInt8] = [0x00, 0x00, 0x00, 0x01]
+    private var loggedFirstKeyframe = false
 
-    init(width: Int32, height: Int32, bitrate: Int) {
+    init(width: Int32, height: Int32, bitrate: Int, codec: VideoCodec, frameRate: Int) {
         self.width = width
         self.height = height
         self.bitrate = bitrate
+        self.codec = codec
+        self.frameRate = frameRate
     }
 
     func start() -> Bool {
@@ -38,7 +43,7 @@ final class VideoEncoder {
             allocator: kCFAllocatorDefault,
             width: width,
             height: height,
-            codecType: kCMVideoCodecType_H264,
+            codecType: codec.cmType,
             encoderSpecification: encoderSpec as CFDictionary,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
@@ -53,23 +58,41 @@ final class VideoEncoder {
 
         configure(session)
         VTCompressionSessionPrepareToEncodeFrames(session)
-        NSLog("[Argus] VideoEncoder started \(width)x\(height) @ \(bitrate) bps")
+        NSLog("[Argus] VideoEncoder started \(width)x\(height) @ \(bitrate) bps (\(codec.rawValue))")
         return true
     }
 
     private func configure(_ session: VTCompressionSession) {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
-                             value: kVTProfileLevel_H264_High_AutoLevel)
+        let profile = codec == .h264
+            ? kVTProfileLevel_H264_High_AutoLevel
+            : kVTProfileLevel_HEVC_Main_AutoLevel
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: profile)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 60 as CFNumber)
+        // No lookahead — emit each frame as soon as it's encoded (low latency).
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
+        // Keyframes are expensive (~10x a P-frame) and briefly saturate USB,
+        // causing fps dips. The transport is reliable TCP, so we only need
+        // periodic keyframes as a backstop (every 5s); the pipeline also asks
+        // for one whenever a frame is actually dropped (see VideoPipeline).
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                             value: (frameRate * 5) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
-        // Data-rate cap (bytes over 1s window) keeps spikes bounded.
-        let cap = [bitrate / 8, 1] as [NSNumber]
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: frameRate as CFNumber)
+        // Generous data-rate cap (1.5x over 1s) so motion bursts aren't stalled
+        // to meet a tight limit; AverageBitRate is the real target. A too-tight
+        // cap makes VideoToolbox delay frames during Mission Control etc.
+        applyDataRateCap(session, bps: bitrate)
+        if codec == .h264 {   // CABAC is an H.264-only property
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode,
+                                 value: kVTH264EntropyMode_CABAC)
+        }
+    }
+
+    private func applyDataRateCap(_ session: VTCompressionSession, bps: Int) {
+        let bytesPerSec = Int(Double(bps) * 1.5 / 8.0)
+        let cap = [bytesPerSec, 1] as [NSNumber]
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: cap as CFArray)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode,
-                             value: kVTH264EntropyMode_CABAC)
     }
 
     /// Live bitrate change (from the Settings slider).
@@ -77,8 +100,7 @@ final class VideoEncoder {
         bitrate = bps
         guard let session else { return }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
-        let cap = [bps / 8, 1] as [NSNumber]
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: cap as CFArray)
+        applyDataRateCap(session, bps: bps)
     }
 
     /// Encode one frame. Optionally force a keyframe (used on first connect).
@@ -113,11 +135,29 @@ final class VideoEncoder {
         let isKeyframe = Self.isKeyframe(sampleBuffer)
         var out = Data()
 
+        // Prefix the frame with its capture timestamp (µs) so the tablet can
+        // pace presentation to the true motion timing (smooth playback).
+        let ptsTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let us: Int64 = ptsTime.isValid ? Int64((ptsTime.seconds * 1_000_000).rounded()) : 0
+        var beTs = us.bigEndian
+        withUnsafeBytes(of: &beTs) { out.append(contentsOf: $0) }
+
         if isKeyframe, let format = CMSampleBufferGetFormatDescription(sampleBuffer) {
-            // Inline SPS/PPS ahead of the IDR so the decoder can configure.
-            for ps in Self.parameterSets(from: format) {
+            // Inline parameter sets (H.264: SPS/PPS; HEVC: VPS/SPS/PPS) ahead
+            // of the IDR so the decoder can configure.
+            let sets = parameterSets(from: format)
+            for ps in sets {
                 out.append(contentsOf: Self.startCode)
                 out.append(ps)
+            }
+            if !loggedFirstKeyframe {
+                loggedFirstKeyframe = true
+                let sizes = sets.map { $0.count }
+                NSLog("[Argus] First keyframe (\(codec.rawValue)): \(sets.count) param sets "
+                      + "sizes=\(sizes). Expected \(codec == .h265 ? 3 : 2).")
+                if sets.isEmpty {
+                    NSLog("[Argus] WARNING: no parameter sets extracted — decoder will show black.")
+                }
             }
         }
 
@@ -162,21 +202,33 @@ final class VideoEncoder {
         return true
     }
 
-    private static func parameterSets(from format: CMFormatDescription) -> [Data] {
+    private func parameterSets(from format: CMFormatDescription) -> [Data] {
         var sets: [Data] = []
         var count = 0
-        // Probe count.
-        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-            format, parameterSetIndex: 0,
-            parameterSetPointerOut: nil, parameterSetSizeOut: nil,
-            parameterSetCountOut: &count, nalUnitHeaderLengthOut: nil)
+        // Probe count (HEVC reports 3: VPS, SPS, PPS; H.264 reports 2).
+        if codec == .h265 {
+            CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                format, parameterSetIndex: 0,
+                parameterSetPointerOut: nil, parameterSetSizeOut: nil,
+                parameterSetCountOut: &count, nalUnitHeaderLengthOut: nil)
+        } else {
+            CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                format, parameterSetIndex: 0,
+                parameterSetPointerOut: nil, parameterSetSizeOut: nil,
+                parameterSetCountOut: &count, nalUnitHeaderLengthOut: nil)
+        }
         for i in 0..<count {
             var ptr: UnsafePointer<UInt8>?
             var size = 0
-            let st = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                format, parameterSetIndex: i,
-                parameterSetPointerOut: &ptr, parameterSetSizeOut: &size,
-                parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil)
+            let st: OSStatus = codec == .h265
+                ? CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                    format, parameterSetIndex: i,
+                    parameterSetPointerOut: &ptr, parameterSetSizeOut: &size,
+                    parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil)
+                : CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    format, parameterSetIndex: i,
+                    parameterSetPointerOut: &ptr, parameterSetSizeOut: &size,
+                    parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil)
             if st == noErr, let ptr {
                 sets.append(Data(bytes: ptr, count: size))
             }
