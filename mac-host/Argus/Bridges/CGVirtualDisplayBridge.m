@@ -21,8 +21,10 @@
     return self.display != nil && self.display.displayID != kCGNullDirectDisplay;
 }
 
-- (BOOL)createWithPixelsWide:(uint32_t)pixelsWide
-                  pixelsHigh:(uint32_t)pixelsHigh
+- (BOOL)createWithModeWidths:(const uint32_t *)widths
+                 modeHeights:(const uint32_t *)heights
+                   modeCount:(NSUInteger)modeCount
+                 defaultMode:(NSUInteger)defaultIdx
                    refreshHz:(double)refreshHz
                        hiDPI:(BOOL)hiDPI
                      widthMM:(double)widthMM
@@ -31,6 +33,7 @@
     if (self.display) {
         [self destroy];
     }
+    if (modeCount == 0) { return NO; }
 
     // Class availability guard — fail gracefully on an OS that renamed the
     // private classes rather than crashing.
@@ -43,14 +46,27 @@
         return NO;
     }
 
+    // `widths`/`heights` are POINT dimensions (the "looks like" sizes passed
+    // to each CGVirtualDisplayMode). Under hiDPI the actual framebuffer is 2x,
+    // so the max addressable pixel count must be 2x the largest point size or
+    // every mode is rejected and the display falls back to 800x600.
+    uint32_t maxPt = 0, maxPtH = 0;
+    for (NSUInteger i = 0; i < modeCount; i++) {
+        if (widths[i]  > maxPt)  maxPt  = widths[i];
+        if (heights[i] > maxPtH) maxPtH = heights[i];
+    }
+    uint32_t scale = hiDPI ? 2 : 1;
+    uint32_t maxW = maxPt * scale;
+    uint32_t maxH = maxPtH * scale;
+
     self.displayQueue = dispatch_queue_create("com.argus.virtualdisplay",
                                               DISPATCH_QUEUE_SERIAL);
 
     CGVirtualDisplayDescriptor *descriptor = [[descClass alloc] init];
     descriptor.queue             = self.displayQueue;
     descriptor.name              = name;
-    descriptor.maxPixelsWide     = pixelsWide;
-    descriptor.maxPixelsHigh     = pixelsHigh;
+    descriptor.maxPixelsWide     = maxW;
+    descriptor.maxPixelsHigh     = maxH;
     descriptor.sizeInMillimeters = CGSizeMake(widthMM, heightMM);
     descriptor.productID         = 0x1234;
     descriptor.vendorID          = 0x3456;
@@ -59,7 +75,6 @@
     __weak typeof(self) weakSelf = self;
     descriptor.terminationHandler = ^(id _Nullable terminationData, id _Nullable display) {
         NSLog(@"[Argus] Virtual display terminated by system.");
-        // Drop our reference on the main queue.
         dispatch_async(dispatch_get_main_queue(), ^{
             weakSelf.display = nil;
         });
@@ -71,14 +86,16 @@
         return NO;
     }
 
-    CGVirtualDisplayMode *mode =
-        [[modeClass alloc] initWithWidth:pixelsWide
-                                  height:pixelsHigh
-                             refreshRate:refreshHz];
+    NSMutableArray<CGVirtualDisplayMode *> *modes = [NSMutableArray array];
+    for (NSUInteger i = 0; i < modeCount; i++) {
+        [modes addObject:[[modeClass alloc] initWithWidth:widths[i]
+                                                   height:heights[i]
+                                              refreshRate:refreshHz]];
+    }
 
     CGVirtualDisplaySettings *settings = [[settingsClass alloc] init];
     settings.hiDPI = hiDPI ? 1 : 0;
-    settings.modes = @[ mode ];
+    settings.modes = modes;
 
     if (![vd applySettings:settings]) {
         NSLog(@"[Argus] applySettings: failed (density rejection?). "
@@ -87,9 +104,69 @@
     }
 
     self.display = vd;
-    NSLog(@"[Argus] Virtual display created: displayID=%u  %ux%u@%.0fHz hiDPI=%d",
-          vd.displayID, pixelsWide, pixelsHigh, refreshHz, hiDPI);
+    NSLog(@"[Argus] Virtual display created: displayID=%u  %lu modes, hiDPI=%d",
+          vd.displayID, (unsigned long)modeCount, hiDPI);
+
+    // Activate the requested default scaling mode (give the system a moment
+    // to register the modes first). Match on framebuffer PIXELS = points*scale.
+    if (defaultIdx < modeCount) {
+        usleep(150000);
+        [self setActiveModePixelWidth:widths[defaultIdx] * scale
+                          pixelHeight:heights[defaultIdx] * scale];
+    }
     return YES;
+}
+
+- (BOOL)setActiveModePixelWidth:(uint32_t)pixelWidth
+                    pixelHeight:(uint32_t)pixelHeight {
+    if (![self isActive]) { return NO; }
+    CGDirectDisplayID did = self.display.displayID;
+
+    // Include HiDPI ("duplicate low-resolution") modes in the listing.
+    NSDictionary *opts = @{ (__bridge NSString *)kCGDisplayShowDuplicateLowResolutionModes : @YES };
+    CFArrayRef modes = CGDisplayCopyAllDisplayModes(did, (__bridge CFDictionaryRef)opts);
+    if (!modes) { return NO; }
+
+    // Among modes matching the pixel size, pick the HIGHEST refresh rate.
+    // macOS often lists several refresh variants per resolution (e.g. a 60 Hz
+    // duplicate next to our 144 Hz mode); taking the first match would silently
+    // land on the low-refresh one.
+    CGDisplayModeRef match = NULL;
+    double matchRefresh = -1.0;
+    CFIndex count = CFArrayGetCount(modes);
+    for (CFIndex i = 0; i < count; i++) {
+        CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+        if (CGDisplayModeGetPixelWidth(m)  == pixelWidth &&
+            CGDisplayModeGetPixelHeight(m) == pixelHeight) {
+            double r = CGDisplayModeGetRefreshRate(m);
+            NSLog(@"[Argus]   candidate %ux%u @ %.2f Hz",
+                  pixelWidth, pixelHeight, r);
+            if (r > matchRefresh) { matchRefresh = r; match = m; }
+        }
+    }
+
+    BOOL ok = NO;
+    if (match) {
+        CGDisplayConfigRef config;
+        if (CGBeginDisplayConfiguration(&config) == kCGErrorSuccess) {
+            CGConfigureDisplayWithDisplayMode(config, did, match, NULL);
+            ok = (CGCompleteDisplayConfiguration(config, kCGConfigurePermanently) == kCGErrorSuccess);
+            if (ok) {
+                // Read back what's actually active now.
+                CGDisplayModeRef active = CGDisplayCopyDisplayMode(did);
+                double activeR = active ? CGDisplayModeGetRefreshRate(active) : 0;
+                if (active) CGDisplayModeRelease(active);
+                NSLog(@"[Argus] Active mode set: framebuffer %ux%u (looks like %ux%u) "
+                       "@ %.2f Hz (active now reports %.2f Hz).",
+                      pixelWidth, pixelHeight, pixelWidth / 2, pixelHeight / 2,
+                      matchRefresh, activeR);
+            }
+        }
+    } else {
+        NSLog(@"[Argus] No display mode matching framebuffer %ux%u.", pixelWidth, pixelHeight);
+    }
+    CFRelease(modes);
+    return ok;
 }
 
 - (void)destroy {
