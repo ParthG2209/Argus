@@ -7,7 +7,6 @@ import SwiftUI
 
 struct MenuBarView: View {
     @ObservedObject var state: AppState
-    @State private var showSettings = false
 
     private var statusColor: Color {
         switch state.status {
@@ -73,15 +72,12 @@ struct MenuBarView: View {
                 } else {
                     Button("Disconnect") { state.coordinator?.disconnect() }
                 }
-                Button("Settings") { showSettings = true }
+                Button("Settings") { SettingsWindowController.shared.show(state: state) }
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }
             }
         }
         .padding(14)
         .frame(width: 280)
-        .sheet(isPresented: $showSettings) {
-            SettingsView(state: state)
-        }
     }
 }
