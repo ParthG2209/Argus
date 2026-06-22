@@ -22,24 +22,34 @@ NS_ASSUME_NONNULL_BEGIN
 /// True while a virtual display is alive.
 @property (nonatomic, readonly) BOOL isActive;
 
-/// Create a virtual extended display.
+/// Create a virtual extended display advertising multiple HiDPI modes
+/// (macOS-style scaling). Each (width,height) pair is a POINT ("looks like")
+/// size; with hiDPI=YES the backing framebuffer is 2x those points.
 ///
-/// @param pixelsWide  Native panel width in pixels (e.g. 2732).
-/// @param pixelsHigh  Native panel height in pixels (e.g. 2048).
+/// @param widths      C array of mode widths in POINTS, one per mode.
+/// @param heights     C array of mode heights in POINTS, one per mode.
+/// @param modeCount   Number of entries in widths/heights.
+/// @param defaultIdx  Index of the mode to activate after creation.
 /// @param refreshHz   Refresh rate (e.g. 60.0).
-/// @param hiDPI       YES to enable 2x backing (Retina). Render res becomes
-///                    2*pixelsWide x 2*pixelsHigh internally.
+/// @param hiDPI       YES to expose modes as 2x Retina modes.
 /// @param widthMM     Physical width in millimeters (e.g. 597).
 /// @param heightMM    Physical height in millimeters (e.g. 336).
 /// @param name        Display name shown in System Settings.
 /// @return YES on success. On success `displayID` is valid.
-- (BOOL)createWithPixelsWide:(uint32_t)pixelsWide
-                  pixelsHigh:(uint32_t)pixelsHigh
+- (BOOL)createWithModeWidths:(const uint32_t *)widths
+                 modeHeights:(const uint32_t *)heights
+                   modeCount:(NSUInteger)modeCount
+                 defaultMode:(NSUInteger)defaultIdx
                    refreshHz:(double)refreshHz
                        hiDPI:(BOOL)hiDPI
                      widthMM:(double)widthMM
                     heightMM:(double)heightMM
                         name:(NSString *)name;
+
+/// Switch the active display mode to the one whose framebuffer pixel size
+/// matches (pixelWidth, pixelHeight). Returns NO if no matching mode is found.
+- (BOOL)setActiveModePixelWidth:(uint32_t)pixelWidth
+                    pixelHeight:(uint32_t)pixelHeight;
 
 /// Tear down the virtual display and release the backing object.
 - (void)destroy;
