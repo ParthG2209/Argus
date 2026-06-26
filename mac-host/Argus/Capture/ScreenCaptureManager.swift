@@ -13,6 +13,7 @@
 
 import Foundation
 import ScreenCaptureKit
+import os
 import CoreMedia
 
 final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
@@ -21,20 +22,13 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Called on the serial audio queue with each PCM audio sample buffer.
     var onAudioSample: ((CMSampleBuffer) -> Void)?
 
-    private var stream: SCStream?
-    private let videoQueue = DispatchQueue(label: "com.argus.capture.video", qos: .userInteractive)
     private let audioQueue = DispatchQueue(label: "com.argus.capture.audio", qos: .userInitiated)
+    private var activeStream: SCStream?
 
     private let targetDisplayID: CGDirectDisplayID
-    private let captureWidth: Int
-    private let captureHeight: Int
-    private let frameRate: Int
 
-    init(displayID: CGDirectDisplayID, width: Int, height: Int, frameRate: Int) {
+    init(displayID: CGDirectDisplayID) {
         self.targetDisplayID = displayID
-        self.captureWidth = width
-        self.captureHeight = height
-        self.frameRate = frameRate
     }
 
     func start() async throws {
@@ -51,19 +45,8 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         let filter = SCContentFilter(display: scDisplay, excludingWindows: [])
 
         let config = SCStreamConfiguration()
-        // Always capture at the tablet's native panel resolution. macOS may be
-        // rendering a larger HiDPI framebuffer (More Space); ScreenCaptureKit
-        // scales it down to these dimensions for transmission.
-        config.width = captureWidth
-        config.height = captureHeight
-        config.scalesToFit = true
-        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(frameRate))
-        config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange // NV12
-        // Shallow queue: hand frames off immediately, don't let SCK buffer a
-        // backlog (that's latency). We process fast, so 3 is plenty.
-        config.queueDepth = 3
-        config.showsCursor = true
-        config.colorSpaceName = CGColorSpace.sRGB
+        config.width = 1
+        config.height = 1
 
         // Audio in the same stream.
         config.capturesAudio = true
@@ -72,52 +55,108 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         config.excludesCurrentProcessAudio = true
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
         try await stream.startCapture()
-        self.stream = stream
-        NSLog("[Argus] ScreenCaptureKit started on display \(targetDisplayID) "
-              + "(\(captureWidth)x\(captureHeight), video+audio).")
+        self.activeStream = stream
+        NSLog("[Argus] ScreenCaptureKit started on display \(targetDisplayID) (audio only).")
     }
 
     func stop() async {
-        guard let stream else { return }
-        try? await stream.stopCapture()
-        self.stream = nil
-    }
-
-    // MARK: - SCStreamOutput
+        if let stream = activeStream {
+            do { try await stream.stopCapture() } catch {}
+            self.activeStream = nil
+        }
+    } // MARK: - SCStreamOutput
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                 of type: SCStreamOutputType) {
         guard sampleBuffer.isValid else { return }
-        switch type {
-        case .screen:
-            handleVideo(sampleBuffer)
-        case .audio:
+        if type == .audio {
             onAudioSample?(sampleBuffer)
-        default:
-            break
         }
-    }
-
-    private func handleVideo(_ sampleBuffer: CMSampleBuffer) {
-        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
-                sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-              let info = attachments.first,
-              let statusRaw = info[.status] as? Int,
-              let frameStatus = SCFrameStatus(rawValue: statusRaw),
-              frameStatus == .complete else {
-            return
-        }
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        onVideoFrame?(pixelBuffer, pts)
     }
 
     // MARK: - SCStreamDelegate
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         NSLog("[Argus] SCStream stopped with error: \(error.localizedDescription)")
+    }
+}
+
+// MARK: - CGDisplayStreamManager
+
+final class CGDisplayStreamManager {
+    /// Called on the serial video queue with each complete NV12 frame.
+    var onVideoFrame: ((CVPixelBuffer, CMTime) -> Void)?
+    
+    private var stream: CGDisplayStream?
+    private let videoQueue = DispatchQueue(label: "com.argus.capture.video", qos: .userInteractive)
+    private let captureCount = OSAllocatedUnfairLock(initialState: 0)
+    
+    private let targetDisplayID: CGDirectDisplayID
+    private let captureWidth: Int
+    private let captureHeight: Int
+    
+    /// Read & reset the capture frame counter (for diagnostics).
+    func takeCaptureCount() -> Int {
+        captureCount.withLock { c in let v = c; c = 0; return v }
+    }
+    
+    init(displayID: CGDirectDisplayID, width: Int, height: Int) {
+        self.targetDisplayID = displayID
+        self.captureWidth = width
+        self.captureHeight = height
+    }
+    
+    func start() {
+        let properties: [CFString: Any] = [
+            CGDisplayStream.showCursor: true,
+            CGDisplayStream.colorSpace: CGColorSpaceCreateDeviceRGB(),
+            CGDisplayStream.minimumFrameTime: 1.0 / 144.0 as CFNumber
+        ]
+        
+        let handler: CGDisplayStreamFrameAvailableHandler = { [weak self] status, displayTime, surface, update in
+            guard let self = self else { return }
+            guard status == .frameComplete, let surface = surface else { return }
+            
+            var unmanagedPB: Unmanaged<CVPixelBuffer>?
+            let result = CVPixelBufferCreateWithIOSurface(kCFAllocatorDefault, surface, nil, &unmanagedPB)
+            guard result == kCVReturnSuccess, let pb = unmanagedPB?.takeRetainedValue() else { return }
+            
+            // Convert Mach absolute time to CMTime
+            var timebaseInfo = mach_timebase_info_data_t()
+            mach_timebase_info(&timebaseInfo)
+            let nanos = displayTime * UInt64(timebaseInfo.numer) / UInt64(timebaseInfo.denom)
+            let pts = CMTime(value: Int64(nanos), timescale: 1_000_000_000)
+            
+            self.captureCount.withLock { $0 += 1 }
+            self.onVideoFrame?(pb, pts)
+        }
+        
+        guard let displayStream = CGDisplayStream(
+            dispatchQueueDisplay: targetDisplayID,
+            outputWidth: captureWidth,
+            outputHeight: captureHeight,
+            pixelFormat: Int32(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+            properties: properties as CFDictionary,
+            queue: videoQueue,
+            handler: handler
+        ) else {
+            NSLog("[Argus] Failed to create CGDisplayStream for display \(targetDisplayID)")
+            return
+        }
+        
+        self.stream = displayStream
+        let err = displayStream.start()
+        if err != .success {
+            NSLog("[Argus] Failed to start CGDisplayStream: error \(err.rawValue)")
+            return
+        }
+        NSLog("[Argus] CGDisplayStream started on display \(targetDisplayID) (\(captureWidth)x\(captureHeight)).")
+    }
+    
+    func stop() {
+        stream?.stop()
+        stream = nil
     }
 }
