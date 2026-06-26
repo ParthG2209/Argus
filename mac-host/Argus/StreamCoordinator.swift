@@ -24,7 +24,8 @@ final class StreamCoordinator {
     private let adb = ADBManager()
     private let virtualDisplay = VirtualDisplayManager()
 
-    private var capture: ScreenCaptureManager?
+    private var audioCapture: ScreenCaptureManager?
+    private var videoCapture: CGDisplayStreamManager?
     private var encoder: VideoEncoder?
     private var videoPipeline: VideoPipeline?
     private var audioEncoder: AudioEncoder?
@@ -81,15 +82,11 @@ final class StreamCoordinator {
         state.update(status: .connected)
 
         // Fallback: if the tablet never reports its resolution, start anyway.
-        helloTimeout = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, !self.streamingStarted else { return }
-                NSLog("[Argus] No resolution hello; using fallback "
-                      + "\(ArgusDisplaySpec.fallbackWidth)x\(ArgusDisplaySpec.fallbackHeight).")
-                self.startStreaming(width: ArgusDisplaySpec.fallbackWidth,
-                                    height: ArgusDisplaySpec.fallbackHeight)
-            }
-        }
+        // We wait for the client to connect and send the 'hello' message.
+        // If an older client connects, we rely on the fact that it doesn't send hello
+        // but it will immediately start receiving frames. Wait, actually we shouldn't
+        // start the stream until we get a hello to be perfectly sized.
+        // We will just wait indefinitely for the 'hello'. Modern clients send it immediately.
     }
 
     /// Handle one line from the input socket: a resolution hello, or an event.
@@ -99,7 +96,9 @@ final class StreamCoordinator {
            hello.type == "hello" {
             if let r = hello.refresh, r > 0 { state.tabletRefresh = r }
             NSLog("[Argus] Tablet reported \(hello.width)x\(hello.height) @ \(state.tabletRefresh)Hz.")
-            startStreaming(width: hello.width, height: hello.height)
+            Task { @MainActor in
+                await startStreaming(width: hello.width, height: hello.height)
+            }
             return
         }
         injector?.handle(line: line)
@@ -107,10 +106,9 @@ final class StreamCoordinator {
 
     /// Create the display + encoder + capture sized to the tablet and begin
     /// streaming. Idempotent (ignores a second hello).
-    private func startStreaming(width: Int, height: Int) {
+    private func startStreaming(width: Int, height: Int) async {
         guard !streamingStarted else { return }
         streamingStarted = true
-        helloTimeout?.invalidate(); helloTimeout = nil
 
         // Native (display) resolution = the tablet's panel. macOS renders the
         // virtual display at this, crisp.
@@ -129,10 +127,10 @@ final class StreamCoordinator {
         // Content rate = a clean integer divisor of the panel refresh, so every
         // frame shows for a whole number of refreshes (smooth, no cadence judder).
         let fps = state.effectiveFrameRate
-        guard let displayID = virtualDisplay.start(presetName: state.scalingPreset,
-                                                   nativeWidth: nativeW,
-                                                   nativeHeight: nativeH,
-                                                   refreshHz: Double(fps)) else {
+        guard let displayID = await virtualDisplay.start(presetName: state.scalingPreset,
+                                                         nativeWidth: nativeW,
+                                                         nativeHeight: nativeH,
+                                                         refreshHz: Double(fps)) else {
             state.lastError = "Failed to create virtual display (private API)."
             return
         }
@@ -176,26 +174,28 @@ final class StreamCoordinator {
         inj.start()
         injector = inj
 
-        let cap = ScreenCaptureManager(displayID: displayID,
-                                       width: streamW, height: streamH,
-                                       frameRate: fps)
-        cap.onVideoFrame = { [weak pipe] pb, pts in pipe?.process(pb, pts: pts) }
-        cap.onAudioSample = { [weak aenc] sb in aenc?.encode(sb) }
-        capture = cap
+        let vcap = CGDisplayStreamManager(displayID: displayID, width: streamW, height: streamH)
+        vcap.onVideoFrame = { [weak pipe] pb, pts in pipe?.process(pb, pts: pts) }
+        videoCapture = vcap
+        vcap.start()
+
+        let acap = ScreenCaptureManager(displayID: displayID)
+        acap.onAudioSample = { [weak aenc] sb in aenc?.encode(sb) }
+        audioCapture = acap
 
         Task {
             do {
-                try await cap.start()
+                try await acap.start()
             } catch {
                 await MainActor.run {
-                    self.state.lastError = "Capture start failed: \(error.localizedDescription)"
+                    self.state.lastError = "Audio capture start failed: \(error.localizedDescription)"
                 }
             }
         }
 
         startFPSTimer()
         NSLog("[Argus] Streaming started: \(streamW)x\(streamH) @ \(fps)fps "
-              + "(panel \(state.tabletRefresh)Hz ÷ \(state.refreshDivisor)).")
+              + "(panel \(state.tabletRefresh)Hz, target \(state.targetFPS) fps).")
     }
 
     private func evenInt(_ v: Double) -> Int {
@@ -210,14 +210,16 @@ final class StreamCoordinator {
         helloTimeout?.invalidate(); helloTimeout = nil
         streamingStarted = false
 
-        let cap = capture
-        Task { await cap?.stop() }
-
+        videoCapture?.stop()
+        videoCapture = nil
+        Task { [acap = audioCapture] in
+            await acap?.stop()
+        }
+        audioCapture = nil
         encoder?.stop(); encoder = nil
         audioEncoder?.stop(); audioEncoder = nil
         injector?.stop(); injector = nil
         videoPipeline = nil
-        capture = nil
 
         videoServer?.stop(); audioServer?.stop(); inputServer?.stop()
         videoServer = nil; audioServer = nil; inputServer = nil
@@ -248,11 +250,10 @@ final class StreamCoordinator {
         }
     }
 
-    /// Change the frame-rate divisor (1=full, 2=half, 3=third of panel refresh).
-    /// Recreates the display + encoder, so reconnect.
-    func applyRefreshDivisor(_ divisor: Int) {
-        guard state.refreshDivisor != divisor else { return }
-        state.refreshDivisor = divisor
+    /// Change the target frame rate. Recreates the display + encoder, so reconnect.
+    func applyTargetFPS(_ fps: Int) {
+        guard state.targetFPS != fps else { return }
+        state.targetFPS = fps
         reconnectIfStreaming()
     }
 
@@ -280,7 +281,12 @@ final class StreamCoordinator {
         fpsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.state.update(fps: self.videoPipeline?.takeFrameCount() ?? 0)
+                let encodedFps = self.videoPipeline?.takeFrameCount() ?? 0
+                let capturedFps = self.videoCapture?.takeCaptureCount() ?? 0
+                self.state.update(fps: encodedFps)
+                if capturedFps > 0 || encodedFps > 0 {
+                    NSLog("[Argus] FPS: captured=%d  encoded=%d", capturedFps, encodedFps)
+                }
             }
         }
     }
