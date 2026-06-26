@@ -39,17 +39,18 @@ struct SettingsView: View {
                 }
 
                 Picker("Frame rate", selection: Binding(
-                    get: { state.refreshDivisor },
-                    set: { state.coordinator?.applyRefreshDivisor($0) }
+                    get: { state.targetFPS },
+                    set: { state.coordinator?.applyTargetFPS($0) }
                 )) {
-                    Text("Full — \(state.tabletRefresh) fps").tag(1)
-                    Text("Half — \(state.tabletRefresh / 2) fps (smoothest)").tag(2)
-                    Text("Third — \(state.tabletRefresh / 3) fps").tag(3)
+                    Text("Auto (\(state.tabletRefresh) Hz)").tag(0)
+                    Text("144 fps").tag(144)
+                    Text("120 fps").tag(120)
+                    Text("90 fps").tag(90)
+                    Text("60 fps").tag(60)
                 }
-                Text("A clean divisor of the \(state.tabletRefresh)Hz panel. "
-                     + "\u{201C}Full\u{201D} targets max fps (paced); \u{201C}Half\u{201D} is a "
-                     + "perfect divisor with zero dropped frames — pick it if Full still "
-                     + "judders.")
+                Text("Auto targets the tablet's detected native refresh rate. "
+                     + "If you pick a specific rate (like 90 fps), make sure your tablet's physical display "
+                     + "supports it to prevent judder. Long-press the Android HUD to cycle its physical refresh rate!")
                     .font(.caption).foregroundStyle(.secondary)
 
                 Picker("Codec", selection: Binding(
