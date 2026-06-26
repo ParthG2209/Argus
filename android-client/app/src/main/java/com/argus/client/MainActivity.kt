@@ -28,6 +28,10 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var lastTool: InputMode? = null
     @Volatile private var lastPressure: Float = 0f
     private var fps = 0
+    private var jitterMs = 0f
+    private var sessionSeconds = 0L
+    private var totalFps = 0L
+    private var totalJitterMs = 0f
 
     private val ui = Handler(Looper.getMainLooper())
     private var overlayVisible = true
@@ -61,6 +65,12 @@ class MainActivity : AppCompatActivity() {
         binding.statusOverlay.setOnClickListener {
             overlayVisible = !overlayVisible
             binding.statusOverlay.alpha = if (overlayVisible) 1f else 0.0f
+        }
+
+        // Long press the overlay to cycle the physical refresh rate.
+        binding.statusOverlay.setOnLongClickListener {
+            cycleRefreshRate()
+            true
         }
 
         startOverlayTicker()
@@ -98,29 +108,51 @@ class MainActivity : AppCompatActivity() {
         android.util.Log.i("ArgusVideo", "Detected panel resolution ${screenW}x${screenH}")
     }
 
+    private var displayModes: List<android.view.Display.Mode> = emptyList()
+    private var currentModeIndex = 0
+
     /** Ask the system for the highest-refresh display mode (e.g. 144 Hz). */
     private fun selectHighRefreshMode() {
         val disp = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) display
                    else @Suppress("DEPRECATION") windowManager.defaultDisplay
         val modes = disp?.supportedModes ?: return
-        // Prefer modes at the native resolution; pick the highest refresh.
+        // Prefer modes at the native resolution; sort by refresh rate descending.
         val atNative = modes.filter {
             (it.physicalWidth == screenW && it.physicalHeight == screenH) ||
             (it.physicalWidth == screenH && it.physicalHeight == screenW)
         }
-        val best = (atNative.ifEmpty { modes.toList() }).maxByOrNull { it.refreshRate } ?: return
+        displayModes = (atNative.ifEmpty { modes.toList() }).sortedByDescending { it.refreshRate }
+        if (displayModes.isEmpty()) return
+        
+        applyDisplayMode(displayModes[currentModeIndex])
+    }
+
+    private fun applyDisplayMode(mode: android.view.Display.Mode) {
         val lp = window.attributes
-        lp.preferredDisplayModeId = best.modeId
+        lp.preferredDisplayModeId = mode.modeId
         window.attributes = lp
-        screenRefresh = Math.round(best.refreshRate)
+        screenRefresh = Math.round(mode.refreshRate)
         android.util.Log.i("ArgusVideo",
-            "Requested display mode ${best.physicalWidth}x${best.physicalHeight}@${best.refreshRate}Hz")
+            "Requested display mode ${mode.physicalWidth}x${mode.physicalHeight}@${mode.refreshRate}Hz")
+    }
+
+    private fun cycleRefreshRate() {
+        if (displayModes.isEmpty()) return
+        currentModeIndex = (currentModeIndex + 1) % displayModes.size
+        applyDisplayMode(displayModes[currentModeIndex])
+        
+        // Reconnect to inform the Mac of the new native refresh rate.
+        teardownPipeline()
+        binding.surfaceView.holder.surface?.let { onSurfaceReady(it) }
     }
 
     private fun teardownPipeline() {
         connection?.stop(); connection = null
         decoder?.stop(); decoder = null
         audioPlayer.stop()
+        sessionSeconds = 0L
+        totalFps = 0L
+        totalJitterMs = 0f
     }
 
     // MARK: - Overlay
@@ -129,6 +161,14 @@ class MainActivity : AppCompatActivity() {
         ui.post(object : Runnable {
             override fun run() {
                 fps = decoder?.takeRenderedCount() ?: 0
+                jitterMs = decoder?.takeJitterMs() ?: 0f
+                
+                if (fps > 0) {
+                    sessionSeconds++
+                    totalFps += fps
+                    totalJitterMs += jitterMs
+                }
+                
                 renderOverlay()
                 ui.postDelayed(this, 1000)
             }
@@ -142,9 +182,14 @@ class MainActivity : AppCompatActivity() {
             ConnectionManager.Status.STREAMING -> "Streaming"
         }
         val toolText = lastTool?.label ?: "—"
+        val avgFps = if (sessionSeconds > 0) totalFps / sessionSeconds else 0L
+        val avgJitter = if (sessionSeconds > 0) totalJitterMs / sessionSeconds else 0f
+        
         val sb = StringBuilder()
         sb.append("ARGUS  ").append(statusText).append('\n')
-        sb.append("FPS:  ").append(fps).append('\n')
+        sb.append("FPS:  ").append(fps).append(" (Avg: ").append(avgFps).append(")\n")
+        sb.append("Jit:  ").append(String.format(java.util.Locale.US, "%.1fms", jitterMs))
+          .append(String.format(java.util.Locale.US, " (Avg: %.1fms)\n", avgJitter))
         sb.append("Res:  2732×2048").append('\n')
         sb.append("Tool: ").append(toolText)
         if (lastTool == InputMode.STYLUS || lastTool == InputMode.ERASER) {
