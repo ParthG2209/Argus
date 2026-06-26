@@ -107,12 +107,27 @@
     NSLog(@"[Argus] Virtual display created: displayID=%u  %lu modes, hiDPI=%d",
           vd.displayID, (unsigned long)modeCount, hiDPI);
 
-    // Activate the requested default scaling mode (give the system a moment
-    // to register the modes first). Match on framebuffer PIXELS = points*scale.
+    // Activate the requested default scaling mode. macOS needs time to
+    // register the display after creation — poll until modes appear (up to 2s).
     if (defaultIdx < modeCount) {
-        usleep(150000);
-        [self setActiveModePixelWidth:widths[defaultIdx] * scale
-                          pixelHeight:heights[defaultIdx] * scale];
+        uint32_t targetW = widths[defaultIdx] * scale;
+        uint32_t targetH = heights[defaultIdx] * scale;
+        BOOL modeSet = [self setActiveModePixelWidth:targetW pixelHeight:targetH];
+        if (!modeSet) {
+            NSLog(@"[Argus] WARNING: could not set display mode after 2s. "
+                   "macOS may be running at a default (60Hz) refresh rate.");
+        }
+        // Log the actual active refresh rate regardless.
+        CGDisplayModeRef active = CGDisplayCopyDisplayMode(vd.displayID);
+        if (active) {
+            double hz = CGDisplayModeGetRefreshRate(active);
+            size_t pw = CGDisplayModeGetPixelWidth(active);
+            size_t ph = CGDisplayModeGetPixelHeight(active);
+            NSLog(@"[Argus] ACTUAL active mode: %zux%zu @ %.2f Hz", pw, ph, hz);
+            CGDisplayModeRelease(active);
+        } else {
+            NSLog(@"[Argus] WARNING: CGDisplayCopyDisplayMode returned NULL.");
+        }
     }
     return YES;
 }
@@ -136,11 +151,11 @@
     CFIndex count = CFArrayGetCount(modes);
     for (CFIndex i = 0; i < count; i++) {
         CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
-        if (CGDisplayModeGetPixelWidth(m)  == pixelWidth &&
-            CGDisplayModeGetPixelHeight(m) == pixelHeight) {
-            double r = CGDisplayModeGetRefreshRate(m);
-            NSLog(@"[Argus]   candidate %ux%u @ %.2f Hz",
-                  pixelWidth, pixelHeight, r);
+        size_t mw = CGDisplayModeGetPixelWidth(m);
+        size_t mh = CGDisplayModeGetPixelHeight(m);
+        double r = CGDisplayModeGetRefreshRate(m);
+        
+        if (mw == pixelWidth && mh == pixelHeight) {
             if (r > matchRefresh) { matchRefresh = r; match = m; }
         }
     }
