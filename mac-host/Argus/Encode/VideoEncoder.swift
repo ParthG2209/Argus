@@ -24,6 +24,7 @@ final class VideoEncoder {
 
     // Annex B start code.
     private static let startCode: [UInt8] = [0x00, 0x00, 0x00, 0x01]
+    private let encodeQueue = DispatchQueue(label: "com.argus.encode.video", qos: .userInteractive)
     private var loggedFirstKeyframe = false
 
     init(width: Int32, height: Int32, bitrate: Int, codec: VideoCodec, frameRate: Int) {
@@ -110,23 +111,29 @@ final class VideoEncoder {
         if forceKeyframe {
             props = [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary
         }
-        VTCompressionSessionEncodeFrame(
-            session,
-            imageBuffer: pixelBuffer,
-            presentationTimeStamp: pts,
-            duration: .invalid,
-            frameProperties: props,
-            infoFlagsOut: nil) { [weak self] status, _, sampleBuffer in
-                guard let self, status == noErr, let sampleBuffer else { return }
-                self.handleEncoded(sampleBuffer)
-            }
+        // Dispatch to encode queue so the capture thread is never blocked by VT backpressure
+        encodeQueue.async { [weak self] in
+            guard let self, let session = self.session else { return }
+            VTCompressionSessionEncodeFrame(
+                session,
+                imageBuffer: pixelBuffer,
+                presentationTimeStamp: pts,
+                duration: .invalid,
+                frameProperties: props,
+                infoFlagsOut: nil) { [weak self] status, _, sampleBuffer in
+                    guard let self, status == noErr, let sampleBuffer else { return }
+                    self.handleEncoded(sampleBuffer)
+                }
+        }
     }
 
     func stop() {
-        guard let session else { return }
-        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
-        VTCompressionSessionInvalidate(session)
-        self.session = nil
+        encodeQueue.sync { [weak self] in
+            guard let self, let s = self.session else { return }
+            VTCompressionSessionCompleteFrames(s, untilPresentationTimeStamp: .invalid)
+            VTCompressionSessionInvalidate(s)
+            self.session = nil
+        }
     }
 
     // MARK: - Encoded sample -> Annex B
