@@ -22,7 +22,7 @@ final class VirtualDisplayManager {
     /// primary display. Returns the new display ID.
     @discardableResult
     func start(presetName: String, nativeWidth w: Int, nativeHeight h: Int,
-               refreshHz: Double) -> CGDirectDisplayID? {
+               refreshHz: Double) async -> CGDirectDisplayID? {
         nativeWidth = w
         nativeHeight = h
 
@@ -52,8 +52,28 @@ final class VirtualDisplayManager {
             NSLog("[Argus] VirtualDisplayManager: creation failed.")
             return nil
         }
-        display.positionToRightOfPrimary()
-        return display.displayID
+        
+        let did = display.displayID
+        
+        // Asynchronously poll until WindowServer publishes the display
+        var modeSet = false
+        for attempt in 1...20 {
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            if self.setScaling(presetName: presetName) {
+                modeSet = true
+                break
+            }
+            NSLog("[Argus] Mode set attempt \(attempt) failed, retrying async...")
+        }
+        
+        if modeSet {
+            self.display.positionToRightOfPrimary()
+            NSLog("[Argus] Virtual display mode set successfully.")
+        } else {
+            NSLog("[Argus] WARNING: Async mode set failed after 2s. macOS may use default refresh rate.")
+        }
+        
+        return did
     }
 
     /// Switch scaling at runtime to the named preset.
