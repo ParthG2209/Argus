@@ -23,9 +23,10 @@ final class AppState: ObservableObject {
     @Published var tabletHeight: Int = ArgusDisplaySpec.fallbackHeight
     @Published var tabletRefresh: Int = 144
 
-    /// Effective content frame rate = panel refresh / divisor. Must be an integer
-    /// divisor so each frame shows for a whole number of refreshes (smooth).
-    var effectiveFrameRate: Int { max(24, tabletRefresh / max(1, refreshDivisor)) }
+    var effectiveFrameRate: Int {
+        if targetFPS > 0 { return targetFPS }
+        return max(24, tabletRefresh)
+    }
 
     // Environment checks
     @Published var adbAvailable: Bool = true
@@ -36,10 +37,9 @@ final class AppState: ObservableObject {
     @AppStorage("scalingPreset") var scalingPreset: String = "Default"
     @AppStorage("bitrateMbpsSetting") var bitrateSetting: Double = 15.0
     @AppStorage("codec") var codec: String = "H.265"
-    // Content frame rate as panel-refresh ÷ divisor (1 = full, 2 = half, 3 = third).
-    // Default Full: frame pacing on the tablet keeps it smooth at max fps. Drop
-    // to Half (a perfect divisor) only if Full still judders.
-    @AppStorage("refreshDivisor") var refreshDivisor: Int = 1
+    // Content frame rate target. 0 means match tablet's native refresh.
+    @AppStorage("targetFPS") var targetFPS: Int = 0
+
     @AppStorage("enablePressure") var enablePressure: Bool = true
     @AppStorage("enableTilt") var enableTilt: Bool = true
     @AppStorage("enableHover") var enableHover: Bool = true
