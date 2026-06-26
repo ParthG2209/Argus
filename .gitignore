@@ -18,3 +18,7 @@ android-client/.idea/
 android-client/captures/
 *.apk
 *.iml
+conversations.json
+argus_context.txt
+argus_build_chat.txt
+argus_all_build_chats.txt
