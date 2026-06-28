@@ -72,6 +72,15 @@ final class VideoPipeline {
 
     /// Called on the serial capture queue for each captured frame.
     func process(_ pixelBuffer: CVPixelBuffer, pts: CMTime) {
+        // Pre-encode backpressure: If the socket is backing up, drop the frame BEFORE
+        // giving it to VideoToolbox. This preserves the H.264 P-frame reference chain
+        // (so we don't need a massive IDR keyframe to recover, which would cause further
+        // Wi-Fi congestion). We use a threshold of 2 (stricter than maxInFlight=3).
+        if server.inFlightCount >= 2 {
+            // Drop frame gracefully to stay perfectly real-time
+            return
+        }
+
         let force = state.withLock { s -> Bool in
             let f = s.needsKeyframe
             s.needsKeyframe = false
