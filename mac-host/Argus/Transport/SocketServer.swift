@@ -21,11 +21,10 @@ private func makeListeningSocket(port: UInt16) -> Int32? {
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
     // Avoid SIGPIPE crashing the process when the tablet disconnects.
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
-
     var addr = sockaddr_in()
     addr.sin_family = sa_family_t(AF_INET)
     addr.sin_port = port.bigEndian
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    addr.sin_addr.s_addr = inet_addr("0.0.0.0")
 
     let bindResult = withUnsafePointer(to: &addr) {
         $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -100,6 +99,8 @@ final class FrameSocketServer {
     }
 
     var hasClient: Bool { clientFD >= 0 }
+    
+    var inFlightCount: Int { inFlight.withLock { $0 } }
 
     func start() -> Bool {
         guard let fd = makeListeningSocket(port: port) else { return false }
@@ -123,6 +124,11 @@ final class FrameSocketServer {
             var yes: Int32 = 1
             setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, socklen_t(MemoryLayout<Int32>.size))
             setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
+            
+            // Limit kernel send buffer to force backpressure to user-space quickly
+            // 64KB is enough for P-frames, but forces blocking on Wi-Fi congestion
+            var sndBuf: Int32 = 65536
+            setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndBuf, socklen_t(MemoryLayout<Int32>.size))
 
             // Write the connect frame (codec handshake) BEFORE exposing the
             // socket via clientFD, so no video frame can race ahead of it.
