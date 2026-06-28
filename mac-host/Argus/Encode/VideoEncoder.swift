@@ -80,33 +80,22 @@ final class VideoEncoder {
                              value: (frameRate * 5) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: frameRate as CFNumber)
-        // Generous data-rate cap (1.5x over 1s) so motion bursts aren't stalled
-        // to meet a tight limit; AverageBitRate is the real target. A too-tight
-        // cap makes VideoToolbox delay frames during Mission Control etc.
-        applyDataRateCap(session, bps: bitrate)
+
         if codec == .h264 {   // CABAC is an H.264-only property
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode,
                                  value: kVTH264EntropyMode_CABAC)
         }
     }
 
-    private func applyDataRateCap(_ session: VTCompressionSession, bps: Int) {
-        let bytesPerSec = Int(Double(bps) * 1.5 / 8.0)
-        let cap = [bytesPerSec, 1] as [NSNumber]
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: cap as CFArray)
-    }
-
     /// Live bitrate change (from the Settings slider).
     func updateBitrate(_ bps: Int) {
         bitrate = bps
-        guard let session else { return }
+        guard let session = session else { return }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
-        applyDataRateCap(session, bps: bps)
     }
 
     /// Encode one frame. Optionally force a keyframe (used on first connect).
     func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, forceKeyframe: Bool = false) {
-        guard let session else { return }
         var props: CFDictionary?
         if forceKeyframe {
             props = [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary

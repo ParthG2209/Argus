@@ -45,10 +45,12 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         let filter = SCContentFilter(display: scDisplay, excludingWindows: [])
 
         let config = SCStreamConfiguration()
-        config.width = 1
-        config.height = 1
+        config.width = scDisplay.width
+        config.height = scDisplay.height
 
-        // Audio in the same stream.
+        // Audio only stream (video is captured by CGDisplayStream).
+        // To silence the 'stream output NOT found' log spam, we add a dummy
+        // video output that just drops the frames.
         config.capturesAudio = true
         config.sampleRate = Int(ArgusAudioSpec.sampleRate)
         config.channelCount = Int(ArgusAudioSpec.channels)
@@ -56,7 +58,25 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
-        try await stream.startCapture()
+        
+        var started = false
+        var lastError: Error?
+        for _ in 0..<5 {
+            do {
+                try await stream.startCapture()
+                started = true
+                break
+            } catch {
+                lastError = error
+                try await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+        
+        if !started {
+            if let lastError = lastError { throw lastError }
+            else { throw NSError(domain: "Argus", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to start SCStream"]) }
+        }
+        
         self.activeStream = stream
         NSLog("[Argus] ScreenCaptureKit started on display \(targetDisplayID) (audio only).")
     }
@@ -96,23 +116,24 @@ final class CGDisplayStreamManager {
     private let targetDisplayID: CGDirectDisplayID
     private let captureWidth: Int
     private let captureHeight: Int
+    private let fps: Int
     
     /// Read & reset the capture frame counter (for diagnostics).
     func takeCaptureCount() -> Int {
         captureCount.withLock { c in let v = c; c = 0; return v }
     }
     
-    init(displayID: CGDirectDisplayID, width: Int, height: Int) {
+    init(displayID: CGDirectDisplayID, width: Int, height: Int, fps: Int) {
         self.targetDisplayID = displayID
         self.captureWidth = width
         self.captureHeight = height
+        self.fps = fps
     }
     
     func start() {
         let properties: [CFString: Any] = [
             CGDisplayStream.showCursor: true,
-            CGDisplayStream.colorSpace: CGColorSpaceCreateDeviceRGB(),
-            CGDisplayStream.minimumFrameTime: 1.0 / 144.0 as CFNumber
+            CGDisplayStream.colorSpace: CGColorSpaceCreateDeviceRGB()
         ]
         
         let handler: CGDisplayStreamFrameAvailableHandler = { [weak self] status, displayTime, surface, update in

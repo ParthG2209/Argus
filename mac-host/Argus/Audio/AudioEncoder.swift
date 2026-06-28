@@ -15,120 +15,104 @@ import CoreMedia
 final class AudioEncoder {
     /// Emits one raw AAC access unit (on the audio capture queue).
     var onEncodedFrame: ((Data) -> Void)?
-
-    private var converter: AudioConverterRef?
+    
+    private let pcmQueue = DispatchQueue(label: "argus.audio.pcm")
+    private var isNonInterleaved = false
     private var inputASBD = AudioStreamBasicDescription()
-    private var outputASBD = AudioStreamBasicDescription()
-
-    // Stable heap buffer for the converter's input callback (must outlive the
-    // enclosing closure — the callback may run after it returns).
-    private var inputBuffer: UnsafeMutableRawBufferPointer?
-    private var inputConsumed = true
 
     func encode(_ sampleBuffer: CMSampleBuffer) {
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
             return
         }
-        if converter == nil { setupConverter(inputFormat: asbd.pointee) }
-        guard let converter else { return }
+        
+        self.isNonInterleaved = (asbd.pointee.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        self.inputASBD = asbd.pointee
 
-        // Extract interleaved PCM.
         var blockBuffer: CMBlockBuffer?
-        var audioBufferList = AudioBufferList()
+        let listSize = MemoryLayout<AudioBufferList>.size + Int(asbd.pointee.mChannelsPerFrame - 1) * MemoryLayout<AudioBuffer>.size
+        let listPointer = UnsafeMutableRawPointer.allocate(byteCount: listSize, alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { listPointer.deallocate() }
+        
         let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
             sampleBuffer,
             bufferListSizeNeededOut: nil,
-            bufferListOut: &audioBufferList,
-            bufferListSize: MemoryLayout<AudioBufferList>.size,
+            bufferListOut: listPointer.assumingMemoryBound(to: AudioBufferList.self),
+            bufferListSize: listSize,
             blockBufferAllocator: nil,
             blockBufferMemoryAllocator: nil,
             flags: 0,
             blockBufferOut: &blockBuffer)
-        guard status == noErr, let buf = audioBufferList.mBuffers.mData else { return }
+        guard status == noErr else { return }
+        
+        let audioBufferList = UnsafeMutableAudioBufferListPointer(listPointer.assumingMemoryBound(to: AudioBufferList.self))
+        pcmQueue.sync {
+            let isFloat = (asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat) != 0
 
-        let byteCount = Int(audioBufferList.mBuffers.mDataByteSize)
-        guard byteCount > 0 else { return }
+            if isNonInterleaved && audioBufferList.count == 2 {
+                let bytesPerChannelFrame = Int(asbd.pointee.mBytesPerFrame)
+                let frameCount = Int(audioBufferList[0].mDataByteSize) / bytesPerChannelFrame
+                let left = audioBufferList[0].mData!
+                let right = audioBufferList[1].mData!
+                
+                let interleavedBytes = frameCount * MemoryLayout<Int16>.size * 2
+                var outData = Data(count: interleavedBytes)
+                
+                outData.withUnsafeMutableBytes { raw in
+                    let outBuf = raw.bindMemory(to: Int16.self).baseAddress!
+                    if isFloat {
+                        let leftPtr = left.assumingMemoryBound(to: Float32.self)
+                        let rightPtr = right.assumingMemoryBound(to: Float32.self)
+                        for i in 0..<frameCount {
+                            let l = max(-1.0, min(1.0, leftPtr[i]))
+                            let r = max(-1.0, min(1.0, rightPtr[i]))
+                            outBuf[i * 2] = Int16(l * 32767.0)
+                            outBuf[i * 2 + 1] = Int16(r * 32767.0)
+                        }
+                    } else {
+                        let leftPtr = left.assumingMemoryBound(to: Int16.self)
+                        let rightPtr = right.assumingMemoryBound(to: Int16.self)
+                        for i in 0..<frameCount {
+                            outBuf[i * 2] = leftPtr[i]
+                            outBuf[i * 2 + 1] = rightPtr[i]
+                        }
+                    }
+                }
+                onEncodedFrame?(outData)
+            } else if audioBufferList.count > 0 {
+                let buf = audioBufferList[0].mData!
+                let byteCount = Int(audioBufferList[0].mDataByteSize)
+                let channels = Int(asbd.pointee.mChannelsPerFrame)
+                let frameCount = byteCount / Int(asbd.pointee.mBytesPerFrame)
 
-        inputBuffer?.deallocate()
-        let stable = UnsafeMutableRawBufferPointer.allocate(byteCount: byteCount, alignment: 16)
-        stable.copyMemory(from: UnsafeRawBufferPointer(start: buf, count: byteCount))
-        inputBuffer = stable
-        inputConsumed = false
-
-        let maxPacketSize = 1536
-        var outData = Data(count: maxPacketSize)
-        var packetDesc = AudioStreamPacketDescription()
-        var encodedSize = 0
-
-        outData.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
-            var outList = AudioBufferList(
-                mNumberBuffers: 1,
-                mBuffers: AudioBuffer(mNumberChannels: ArgusAudioSpec.channels,
-                                      mDataByteSize: UInt32(maxPacketSize),
-                                      mData: raw.baseAddress))
-            var ioPackets: UInt32 = 1
-            let convStatus = AudioConverterFillComplexBuffer(
-                converter,
-                Self.inputDataProc,
-                Unmanaged.passUnretained(self).toOpaque(),
-                &ioPackets,
-                &outList,
-                &packetDesc)
-            if (convStatus == noErr || convStatus == 1) && ioPackets > 0 {
-                encodedSize = Int(outList.mBuffers.mDataByteSize)
+                if isFloat {
+                    var outData = Data(count: frameCount * channels * MemoryLayout<Int16>.size)
+                    outData.withUnsafeMutableBytes { raw in
+                        let outBuf = raw.bindMemory(to: Int16.self).baseAddress!
+                        let inPtr = buf.assumingMemoryBound(to: Float32.self)
+                        for i in 0..<(frameCount * channels) {
+                            let sample = max(-1.0, min(1.0, inPtr[i]))
+                            outBuf[i] = Int16(sample * 32767.0)
+                        }
+                    }
+                    onEncodedFrame?(outData)
+                } else {
+                    let outData = Data(bytes: buf, count: byteCount)
+                    onEncodedFrame?(outData)
+                }
             }
-        }
-
-        if encodedSize > 0 {
-            onEncodedFrame?(Data(outData.prefix(encodedSize)))
         }
     }
 
+    private func drainEncoder() {
+    }
+
     func stop() {
-        if let converter { AudioConverterDispose(converter); self.converter = nil }
-        inputBuffer?.deallocate(); inputBuffer = nil; inputConsumed = true
     }
 
     // MARK: - Converter setup
 
     private func setupConverter(inputFormat: AudioStreamBasicDescription) {
-        inputASBD = inputFormat
-        var out = AudioStreamBasicDescription()
-        out.mSampleRate = ArgusAudioSpec.sampleRate
-        out.mFormatID = kAudioFormatMPEG4AAC
-        out.mChannelsPerFrame = ArgusAudioSpec.channels
-        out.mFramesPerPacket = 1024
-        outputASBD = out
-
-        var conv: AudioConverterRef?
-        let status = AudioConverterNew(&inputASBD, &outputASBD, &conv)
-        guard status == noErr, let conv else {
-            NSLog("[Argus] AudioConverterNew failed: \(status)")
-            return
-        }
-        var bitrate = UInt32(ArgusAudioSpec.bitrate)
-        AudioConverterSetProperty(conv, kAudioConverterEncodeBitRate,
-                                  UInt32(MemoryLayout<UInt32>.size), &bitrate)
-        converter = conv
-    }
-
-    private static let inputDataProc: AudioConverterComplexInputDataProc = {
-        (_, ioNumberDataPackets, ioData, _, inUserData) -> OSStatus in
-        guard let inUserData else { ioNumberDataPackets.pointee = 0; return -1 }
-        let me = Unmanaged<AudioEncoder>.fromOpaque(inUserData).takeUnretainedValue()
-        guard let buffer = me.inputBuffer, !me.inputConsumed, buffer.count > 0,
-              let base = buffer.baseAddress else {
-            ioNumberDataPackets.pointee = 0
-            return -1
-        }
-        let bytesPerFrame = max(1, Int(me.inputASBD.mBytesPerFrame))
-        ioNumberDataPackets.pointee = UInt32(buffer.count / bytesPerFrame)
-        ioData.pointee.mNumberBuffers = 1
-        ioData.pointee.mBuffers.mNumberChannels = me.inputASBD.mChannelsPerFrame
-        ioData.pointee.mBuffers.mDataByteSize = UInt32(buffer.count)
-        ioData.pointee.mBuffers.mData = base
-        me.inputConsumed = true
-        return noErr
+        // No setup needed for Raw PCM forwarding.
     }
 }

@@ -140,7 +140,17 @@ class ConnectionManager(
     private suspend fun readAudio(socket: Socket) {
         val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 1 shl 16))
         while (scope.isActive && active) {
-            val frame = readFrame(input) ?: break
+            var frame = readFrame(input) ?: break
+            
+            // Catch-up logic: if the Mac is generating audio slightly faster than
+            // the tablet can play it (clock drift), or if the tablet paused for GC,
+            // latency. Raw PCM is ~1920 bytes per 10ms frame. 
+            // We instantly drop old frames if the buffer has > 2 packets (~20ms).
+            while (input.available() > 4000 && scope.isActive && active) {
+                val nextFrame = readFrame(input) ?: break
+                frame = nextFrame // Keep the freshest frame
+            }
+            
             audioPlayer.submitFrame(frame)
         }
         Log.i(TAG, "Audio stream ended.")

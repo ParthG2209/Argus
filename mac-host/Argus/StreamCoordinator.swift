@@ -66,7 +66,7 @@ final class StreamCoordinator {
         // Build + fully wire all servers BEFORE opening any listener (the
         // tablet may dial in the instant a listener opens).
         let video = FrameSocketServer(port: ArgusPorts.video, label: "video", maxInFlight: 3)
-        let audioSrv = FrameSocketServer(port: ArgusPorts.audio, label: "audio")
+        let audioSrv = FrameSocketServer(port: ArgusPorts.audio, label: "audio", maxInFlight: 5)
         let input = LineSocketServer(port: ArgusPorts.input, label: "input")
         videoServer = video; audioServer = audioSrv; inputServer = input
 
@@ -184,7 +184,7 @@ final class StreamCoordinator {
         inj.start()
         injector = inj
 
-        let vcap = CGDisplayStreamManager(displayID: displayID, width: finalStreamW, height: finalStreamH)
+        let vcap = CGDisplayStreamManager(displayID: displayID, width: finalStreamW, height: finalStreamH, fps: fps)
         vcap.onVideoFrame = { [weak pipe] pb, pts in pipe?.process(pb, pts: pts) }
         videoCapture = vcap
         vcap.start()
