@@ -119,10 +119,20 @@ final class StreamCoordinator {
         state.tabletWidth = nativeW
         state.tabletHeight = nativeH
 
-        // Stream (encode) resolution = the tablet's native pixels (even dims for
-        // the codec). Always native — pixel-perfect, no upscaling on the tablet.
-        let streamW = evenInt(Double(nativeW))
-        let streamH = evenInt(Double(nativeH))
+        // Stream (encode) resolution
+        var streamW = Double(nativeW)
+        var streamH = Double(nativeH)
+        
+        // Cap the stream to a max of 2880 pixels wide to guarantee 120fps hardware encode
+        // without severely impacting visual sharpness.
+        if streamW > 2880 {
+            let scale = 2880.0 / streamW
+            streamW = 2880.0
+            streamH = streamH * scale
+        }
+        
+        let finalStreamW = evenInt(streamW)
+        let finalStreamH = evenInt(streamH)
 
         // Content rate = a clean integer divisor of the panel refresh, so every
         // frame shows for a whole number of refreshes (smooth, no cadence judder).
@@ -136,8 +146,8 @@ final class StreamCoordinator {
         }
 
         let codec = VideoCodec(rawValue: state.codec) ?? .h264
-        let enc = VideoEncoder(width: Int32(streamW),
-                               height: Int32(streamH),
+        let enc = VideoEncoder(width: Int32(finalStreamW),
+                               height: Int32(finalStreamH),
                                bitrate: Int(state.bitrateSetting * 1_000_000),
                                codec: codec,
                                frameRate: fps)
@@ -174,7 +184,7 @@ final class StreamCoordinator {
         inj.start()
         injector = inj
 
-        let vcap = CGDisplayStreamManager(displayID: displayID, width: streamW, height: streamH)
+        let vcap = CGDisplayStreamManager(displayID: displayID, width: finalStreamW, height: finalStreamH)
         vcap.onVideoFrame = { [weak pipe] pb, pts in pipe?.process(pb, pts: pts) }
         videoCapture = vcap
         vcap.start()
