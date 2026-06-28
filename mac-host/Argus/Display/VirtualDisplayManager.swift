@@ -107,7 +107,15 @@ final class VirtualDisplayManager {
                 keepAliveWindow = nil
             }
         }
-        display.destroy()
+        
+        // Defer display destruction to the NEXT runloop tick.
+        // `close()` queues a window removal to the WindowServer. If we destroy 
+        // the display in the exact same runloop tick, the WindowServer crashes 
+        // because the window is technically still registered on a dead screen.
+        let d = display
+        DispatchQueue.main.async {
+            d.destroy()
+        }
     }
     
     private func spawnKeepAliveWindow(displayID: CGDirectDisplayID) {
