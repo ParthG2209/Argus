@@ -49,7 +49,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Switch the active display mode to the one whose framebuffer pixel size
 /// matches (pixelWidth, pixelHeight). Returns NO if no matching mode is found.
 - (BOOL)setActiveModePixelWidth:(uint32_t)pixelWidth
-                    pixelHeight:(uint32_t)pixelHeight;
+                    pixelHeight:(uint32_t)pixelHeight
+                      refreshHz:(double)targetRefreshHz;
 
 /// Tear down the virtual display and release the backing object.
 - (void)destroy;
