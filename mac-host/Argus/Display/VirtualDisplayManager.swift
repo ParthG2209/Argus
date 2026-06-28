@@ -7,12 +7,15 @@
 
 import Foundation
 import CoreGraphics
+import AppKit
+import CoreVideo
 
 final class VirtualDisplayManager {
     private let display = ArgusVirtualDisplay()
     private var nativeWidth = ArgusDisplaySpec.fallbackWidth
     private var nativeHeight = ArgusDisplaySpec.fallbackHeight
     private var currentRefreshHz: Double = 60.0
+    private var keepAliveWindow: NSWindow?
 
     var displayID: CGDirectDisplayID { display.displayID }
     var isActive: Bool { display.isActive }
@@ -71,6 +74,11 @@ final class VirtualDisplayManager {
         if modeSet {
             self.display.positionToRightOfPrimary()
             NSLog("[Argus] Virtual display mode set successfully.")
+            
+            // Spawn the invisible keep-alive window on the main thread
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.spawnKeepAliveWindow(displayID: did)
+            }
         } else {
             NSLog("[Argus] WARNING: Async mode set failed after 2s. macOS may use default refresh rate.")
         }
@@ -88,6 +96,62 @@ final class VirtualDisplayManager {
     }
 
     func stop() {
+        DispatchQueue.main.async { [weak self] in
+            self?.keepAliveWindow?.close()
+            self?.keepAliveWindow = nil
+        }
         display.destroy()
+    }
+    
+    private func spawnKeepAliveWindow(displayID: CGDirectDisplayID) {
+        var targetScreen: NSScreen?
+        for screen in NSScreen.screens {
+            if let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+                if num.uint32Value == displayID {
+                    targetScreen = screen
+                    break
+                }
+            }
+        }
+        
+        let screenRect = targetScreen?.frame ?? NSRect(x: 10000, y: 10000, width: 1, height: 1)
+        let tinyRect = NSRect(x: screenRect.minX, y: screenRect.minY, width: 1, height: 1)
+        
+        let window = KeepAliveWindow(contentRect: tinyRect, displayID: displayID)
+        window.orderFront(nil)
+        self.keepAliveWindow = window
+        NSLog("[Argus] KeepAliveWindow spawned to lock refresh rate.")
+    }
+}
+
+// MARK: - KeepAliveWindow
+
+final class KeepAliveWindow: NSWindow {
+    init(contentRect: NSRect, displayID: CGDirectDisplayID) {
+        super.init(contentRect: contentRect,
+                   styleMask: .borderless,
+                   backing: .buffered,
+                   defer: false)
+        
+        self.backgroundColor = .clear
+        self.isOpaque = false
+        self.hasShadow = false
+        self.ignoresMouseEvents = true
+        self.level = .floating // Ensure it stays on top
+        self.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        view.wantsLayer = true
+        self.contentView = view
+        
+        // Attach a continuous CoreAnimation to force the WindowServer to composite
+        // the display at maximum refresh rate without flooding the main thread.
+        let anim = CABasicAnimation(keyPath: "backgroundColor")
+        anim.fromValue = NSColor(white: 0.5, alpha: 0.01).cgColor
+        anim.toValue = NSColor(white: 0.5, alpha: 0.02).cgColor
+        anim.duration = 0.5
+        anim.autoreverses = true
+        anim.repeatCount = .infinity
+        view.layer?.add(anim, forKey: "keepAlive")
     }
 }
