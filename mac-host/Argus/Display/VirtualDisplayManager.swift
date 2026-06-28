@@ -12,6 +12,7 @@ final class VirtualDisplayManager {
     private let display = ArgusVirtualDisplay()
     private var nativeWidth = ArgusDisplaySpec.fallbackWidth
     private var nativeHeight = ArgusDisplaySpec.fallbackHeight
+    private var currentRefreshHz: Double = 60.0
 
     var displayID: CGDirectDisplayID { display.displayID }
     var isActive: Bool { display.isActive }
@@ -25,6 +26,7 @@ final class VirtualDisplayManager {
                refreshHz: Double) async -> CGDirectDisplayID? {
         nativeWidth = w
         nativeHeight = h
+        currentRefreshHz = refreshHz
 
         let presets = ArgusDisplaySpec.scalingPresets
         // Mode dimensions are POINTS; the bridge derives the 2x backing.
@@ -82,7 +84,7 @@ final class VirtualDisplayManager {
         guard isActive else { return false }
         let p = ArgusDisplaySpec.preset(named: presetName)
         let (pxW, pxH) = p.pixels(forNativeWidth: nativeWidth, height: nativeHeight)
-        return display.setActiveModePixelWidth(pxW, pixelHeight: pxH)
+        return display.setActiveModePixelWidth(pxW, pixelHeight: pxH, refreshHz: currentRefreshHz)
     }
 
     func stop() {
