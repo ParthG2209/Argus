@@ -72,11 +72,11 @@
     descriptor.vendorID          = 0x3456;
     descriptor.serialNum         = 0x0001;
 
-    __weak typeof(self) weakSelf = self;
+    __block typeof(self) blockSelf = self;
     descriptor.terminationHandler = ^(id _Nullable terminationData, id _Nullable display) {
         NSLog(@"[Argus] Virtual display terminated by system.");
         dispatch_async(dispatch_get_main_queue(), ^{
-            weakSelf.display = nil;
+            blockSelf.display = nil;
         });
     };
 
@@ -112,7 +112,7 @@
     if (defaultIdx < modeCount) {
         uint32_t targetW = widths[defaultIdx] * scale;
         uint32_t targetH = heights[defaultIdx] * scale;
-        BOOL modeSet = [self setActiveModePixelWidth:targetW pixelHeight:targetH];
+        BOOL modeSet = [self setActiveModePixelWidth:targetW pixelHeight:targetH refreshHz:refreshHz];
         if (!modeSet) {
             NSLog(@"[Argus] WARNING: could not set display mode after 2s. "
                    "macOS may be running at a default (60Hz) refresh rate.");
@@ -133,7 +133,8 @@
 }
 
 - (BOOL)setActiveModePixelWidth:(uint32_t)pixelWidth
-                    pixelHeight:(uint32_t)pixelHeight {
+                    pixelHeight:(uint32_t)pixelHeight
+                      refreshHz:(double)targetRefreshHz {
     if (![self isActive]) { return NO; }
     CGDirectDisplayID did = self.display.displayID;
 
@@ -147,7 +148,7 @@
     // duplicate next to our 144 Hz mode); taking the first match would silently
     // land on the low-refresh one.
     CGDisplayModeRef match = NULL;
-    double matchRefresh = -1.0;
+    double closestDiff = DBL_MAX;
     CFIndex count = CFArrayGetCount(modes);
     for (CFIndex i = 0; i < count; i++) {
         CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
@@ -156,7 +157,11 @@
         double r = CGDisplayModeGetRefreshRate(m);
         
         if (mw == pixelWidth && mh == pixelHeight) {
-            if (r > matchRefresh) { matchRefresh = r; match = m; }
+            double diff = fabs(r - targetRefreshHz);
+            if (diff < closestDiff) {
+                closestDiff = diff;
+                match = m;
+            }
         }
     }
 
@@ -174,7 +179,7 @@
                 NSLog(@"[Argus] Active mode set: framebuffer %ux%u (looks like %ux%u) "
                        "@ %.2f Hz (active now reports %.2f Hz).",
                       pixelWidth, pixelHeight, pixelWidth / 2, pixelHeight / 2,
-                      matchRefresh, activeR);
+                      targetRefreshHz, activeR);
             }
         }
     } else {
