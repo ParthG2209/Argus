@@ -2,117 +2,130 @@
 //  AudioEncoder.swift
 //  Argus
 //
-//  Encodes PCM audio sample buffers (delivered by the shared ScreenCaptureKit
-//  stream) to AAC-LC (48 kHz, stereo, 128 kbps) with AudioToolbox, emitting
-//  raw AAC access units. No SCStream of its own — it is fed by
-//  ScreenCaptureManager.onAudioSample on the capture's serial audio queue.
-//
 
 import Foundation
-import AudioToolbox
 import CoreMedia
+import AVFoundation
+import os
 
 final class AudioEncoder {
-    /// Emits one raw AAC access unit (on the audio capture queue).
     var onEncodedFrame: ((Data) -> Void)?
-    
     private let pcmQueue = DispatchQueue(label: "argus.audio.pcm")
-    private var isNonInterleaved = false
-    private var inputASBD = AudioStreamBasicDescription()
+    private var converter: AVAudioConverter?
+    private var inFormat: AVAudioFormat?
+    private var outFormat: AVAudioFormat?
+    private let targetSampleRate: Double = 48000
+    private let targetChannels: AVAudioChannelCount = 2
 
     func encode(_ sampleBuffer: CMSampleBuffer) {
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
+              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
             return
         }
         
-        self.isNonInterleaved = (asbd.pointee.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
-        self.inputASBD = asbd.pointee
-
-        var blockBuffer: CMBlockBuffer?
-        let listSize = MemoryLayout<AudioBufferList>.size + Int(asbd.pointee.mChannelsPerFrame - 1) * MemoryLayout<AudioBuffer>.size
-        let listPointer = UnsafeMutableRawPointer.allocate(byteCount: listSize, alignment: MemoryLayout<AudioBufferList>.alignment)
-        defer { listPointer.deallocate() }
-        
-        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            bufferListSizeNeededOut: nil,
-            bufferListOut: listPointer.assumingMemoryBound(to: AudioBufferList.self),
-            bufferListSize: listSize,
-            blockBufferAllocator: nil,
-            blockBufferMemoryAllocator: nil,
-            flags: 0,
-            blockBufferOut: &blockBuffer)
-        guard status == noErr else { return }
-        
-        let audioBufferList = UnsafeMutableAudioBufferListPointer(listPointer.assumingMemoryBound(to: AudioBufferList.self))
         pcmQueue.sync {
-            let isFloat = (asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-
-            if isNonInterleaved && audioBufferList.count == 2 {
-                let bytesPerChannelFrame = Int(asbd.pointee.mBytesPerFrame)
-                let frameCount = Int(audioBufferList[0].mDataByteSize) / bytesPerChannelFrame
-                let left = audioBufferList[0].mData!
-                let right = audioBufferList[1].mData!
-                
-                let interleavedBytes = frameCount * MemoryLayout<Int16>.size * 2
-                var outData = Data(count: interleavedBytes)
-                
-                outData.withUnsafeMutableBytes { raw in
-                    let outBuf = raw.bindMemory(to: Int16.self).baseAddress!
-                    if isFloat {
-                        let leftPtr = left.assumingMemoryBound(to: Float32.self)
-                        let rightPtr = right.assumingMemoryBound(to: Float32.self)
-                        for i in 0..<frameCount {
-                            let l = max(-1.0, min(1.0, leftPtr[i]))
-                            let r = max(-1.0, min(1.0, rightPtr[i]))
-                            outBuf[i * 2] = Int16(l * 32767.0)
-                            outBuf[i * 2 + 1] = Int16(r * 32767.0)
-                        }
-                    } else {
-                        let leftPtr = left.assumingMemoryBound(to: Int16.self)
-                        let rightPtr = right.assumingMemoryBound(to: Int16.self)
-                        for i in 0..<frameCount {
-                            outBuf[i * 2] = leftPtr[i]
-                            outBuf[i * 2 + 1] = rightPtr[i]
-                        }
-                    }
+            let currentInFormat = AVAudioFormat(streamDescription: asbdPtr)
+            guard let currentInFormat = currentInFormat else {
+                NSLog("[ArgusAudio] Failed to create AVAudioFormat from ASBD")
+                return
+            }
+            
+            if converter == nil || inFormat != currentInFormat {
+                self.inFormat = currentInFormat
+                self.outFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                               sampleRate: targetSampleRate,
+                                               channels: targetChannels,
+                                               interleaved: true)
+                guard let outF = self.outFormat else { return }
+                self.converter = AVAudioConverter(from: currentInFormat, to: outF)
+                if self.converter == nil {
+                    NSLog("[ArgusAudio] Failed to create AVAudioConverter")
                 }
-                onEncodedFrame?(outData)
-            } else if audioBufferList.count > 0 {
-                let buf = audioBufferList[0].mData!
-                let byteCount = Int(audioBufferList[0].mDataByteSize)
-                let channels = Int(asbd.pointee.mChannelsPerFrame)
-                let frameCount = byteCount / Int(asbd.pointee.mBytesPerFrame)
-
-                if isFloat {
-                    var outData = Data(count: frameCount * channels * MemoryLayout<Int16>.size)
-                    outData.withUnsafeMutableBytes { raw in
-                        let outBuf = raw.bindMemory(to: Int16.self).baseAddress!
-                        let inPtr = buf.assumingMemoryBound(to: Float32.self)
-                        for i in 0..<(frameCount * channels) {
-                            let sample = max(-1.0, min(1.0, inPtr[i]))
-                            outBuf[i] = Int16(sample * 32767.0)
-                        }
-                    }
+            }
+            
+            guard let converter = converter, let outFormat = outFormat else { return }
+            
+            var blockBuffer: CMBlockBuffer?
+            let listSize = MemoryLayout<AudioBufferList>.size + Int(asbdPtr.pointee.mChannelsPerFrame - 1) * MemoryLayout<AudioBuffer>.size
+            let listPointer = UnsafeMutableRawPointer.allocate(byteCount: listSize, alignment: MemoryLayout<AudioBufferList>.alignment)
+            defer { listPointer.deallocate() }
+            
+            let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                sampleBuffer,
+                bufferListSizeNeededOut: nil,
+                bufferListOut: listPointer.assumingMemoryBound(to: AudioBufferList.self),
+                bufferListSize: listSize,
+                blockBufferAllocator: nil,
+                blockBufferMemoryAllocator: nil,
+                flags: 0,
+                blockBufferOut: &blockBuffer)
+            
+            guard status == noErr else {
+                NSLog("[ArgusAudio] GetAudioBufferList failed: \(status)")
+                return
+            }
+            
+            let numFrames = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+            guard numFrames > 0 else { return }
+            
+            guard let inBuffer = AVAudioPCMBuffer(pcmFormat: currentInFormat, frameCapacity: numFrames) else {
+                NSLog("[ArgusAudio] Failed to create inBuffer")
+                return
+            }
+            inBuffer.frameLength = numFrames
+            
+            let srcBuffers = UnsafeMutableAudioBufferListPointer(listPointer.assumingMemoryBound(to: AudioBufferList.self))
+            let dstBuffers = UnsafeMutableAudioBufferListPointer(inBuffer.mutableAudioBufferList)
+            
+            for i in 0..<min(srcBuffers.count, dstBuffers.count) {
+                if let srcData = srcBuffers[i].mData, let dstData = dstBuffers[i].mData {
+                    memcpy(dstData, srcData, Int(srcBuffers[i].mDataByteSize))
+                }
+            }
+            
+            let ratio = targetSampleRate / currentInFormat.sampleRate
+            let outFrameCapacity = AVAudioFrameCount(Double(numFrames) * ratio) + 4096
+            
+            guard let outBuffer = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: outFrameCapacity) else {
+                NSLog("[ArgusAudio] Failed to create outBuffer")
+                return
+            }
+            
+            var provided = false
+            let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
+                if provided {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                provided = true
+                outStatus.pointee = .haveData
+                return inBuffer
+            }
+            
+            var error: NSError? = nil
+            let convStatus = converter.convert(to: outBuffer, error: &error, withInputFrom: inputBlock)
+            
+            if convStatus == .error {
+                NSLog("[ArgusAudio] Converter error: \(String(describing: error))")
+                return
+            }
+            
+            let frameLength = Int(outBuffer.frameLength)
+            if frameLength > 0 {
+                let byteLength = frameLength * Int(targetChannels) * MemoryLayout<Int16>.size
+                if let int16ChannelData = outBuffer.int16ChannelData {
+                    let outData = Data(bytes: int16ChannelData[0], count: byteLength)
                     onEncodedFrame?(outData)
                 } else {
-                    let outData = Data(bytes: buf, count: byteCount)
-                    onEncodedFrame?(outData)
+                    NSLog("[ArgusAudio] int16ChannelData is nil")
                 }
             }
         }
     }
 
-    private func drainEncoder() {
-    }
-
     func stop() {
-    }
-
-    // MARK: - Converter setup
-
-    private func setupConverter(inputFormat: AudioStreamBasicDescription) {
-        // No setup needed for Raw PCM forwarding.
+        pcmQueue.sync {
+            converter?.reset()
+        }
     }
 }
