@@ -23,6 +23,8 @@ class MainActivity : AppCompatActivity() {
     private val audioPlayer = AudioPlayer()
     private val inputForwarder = InputForwarder()
     private var connection: ConnectionManager? = null
+    private var discoveryManager: DiscoveryManager? = null
+    private var discoveredHost: String? = null
 
     @Volatile private var status = ConnectionManager.Status.DISCONNECTED
     @Volatile private var lastTool: InputMode? = null
@@ -74,6 +76,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         startOverlayTicker()
+
+        discoveryManager = DiscoveryManager(this)
+        discoveryManager?.onHostDiscovered = { host ->
+            discoveredHost = host
+            connection?.wifiHost = host
+        }
+        discoveryManager?.startDiscovery()
     }
 
     private fun onSurfaceReady(surface: Surface) {
@@ -87,6 +96,7 @@ class MainActivity : AppCompatActivity() {
 
         val conn = ConnectionManager(dec, audioPlayer, inputForwarder, screenW, screenH, screenRefresh)
         conn.onStatus = { s -> status = s }
+        conn.wifiHost = discoveredHost
         conn.start()
         connection = conn
     }
@@ -231,5 +241,6 @@ class MainActivity : AppCompatActivity() {
         ui.removeCallbacksAndMessages(null)
         teardownPipeline()
         inputForwarder.close()
+        discoveryManager?.stopDiscovery()
     }
 }
