@@ -23,65 +23,65 @@
 
 ---
 
-## ⚡️ Overview
+## Overview
 
-Argus transforms any Android tablet into a blazing-fast, zero-latency extended external display for your Mac. Built entirely on hardware-accelerated APIs, Argus bypasses standard networking stacks to deliver raw performance directly over USB.
+Argus transforms any Android tablet into a high-performance, zero-latency extended external display for macOS. Built entirely on hardware-accelerated APIs, Argus bypasses standard networking stacks to deliver raw performance directly over USB.
 
-Whether you're watching videos, coding, or simply needing a second monitor on the go, Argus delivers an experience so seamless, it feels natively wired.
+Designed for professional workflows, video playback, and software development, Argus delivers an experience so seamless it feels natively wired.
 
-## ✨ Features
+## Features
 
-- 🖥️ **True Virtual Display:** Uses macOS private APIs (`CGVirtualDisplay`) to create a true, hardware-recognized secondary monitor—not just a screen mirror.
-- 🚀 **Hardware Accelerated:** Leverages Apple's `VideoToolbox` (H.264 / HEVC) and Android's `MediaCodec` for absolute maximum framerates (60-120+ FPS) with minimal CPU overhead.
-- 🔊 **Zero-Latency Audio:** Transmits uncompressed, raw 16-bit PCM audio directly to the tablet's hardware mixer, achieving near 0ms latency sync for flawless video playback.
-- 📐 **Auto-Resolution Matching:** The Mac automatically adjusts the virtual display resolution to perfectly match the physical pixels of your tablet. No black bars. No stretching.
-- 🔌 **USB Tethering via ADB:** Uses ADB reverse port forwarding to pipe massive bandwidth over a standard USB cable, completely immune to Wi-Fi interference.
+- **True Virtual Display:** Utilizes macOS private APIs (`CGVirtualDisplay`) to create a true, hardware-recognized secondary monitor rather than a screen mirror.
+- **Hardware Accelerated:** Leverages Apple's `VideoToolbox` (H.264 / HEVC) and Android's `MediaCodec` for absolute maximum framerates (60-120+ FPS) with minimal CPU overhead.
+- **Zero-Latency Audio:** Transmits uncompressed, raw 16-bit PCM audio directly to the tablet's hardware mixer, achieving near 0ms latency sync for flawless video playback.
+- **Auto-Resolution Matching:** The macOS host automatically adjusts the virtual display resolution to perfectly match the physical pixels of the target tablet.
+- **USB Tethering via ADB:** Uses ADB reverse port forwarding to pipe massive bandwidth over a standard USB cable, maintaining immunity to Wi-Fi interference.
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 Argus consists of two deeply integrated components communicating over local TCP sockets:
 
 ### 1. macOS Host App
-- **Virtualization:** Uses `CGVirtualDisplay` (reverse-engineered private framework) to trick macOS into creating a physical display.
+- **Virtualization:** Uses `CGVirtualDisplay` (reverse-engineered private framework) to provision a physical display representation to WindowServer.
 - **Capture:** `ScreenCaptureKit` rapidly pulls frames directly from the GPU framebuffer.
-- **Video:** `VideoToolbox` instantly encodes frames to H.264 NAL units.
-- **Audio:** Bypasses codecs entirely, converting 32-bit Float PCM to 16-bit Int PCM and streaming raw bytes directly to the socket.
+- **Video:** `VideoToolbox` encodes frames to H.264 NAL units asynchronously.
+- **Audio:** Bypasses codecs entirely, converting 32-bit Float PCM to 16-bit Int PCM and streaming raw bytes directly to the TCP socket.
 
 ### 2. Android Client App
 - **Network:** Connects over `localhost` via ADB reverse tethering.
 - **Video:** Feeds raw H.264 NAL units directly into the Android `MediaCodec` hardware decoder for zero-copy rendering onto a `SurfaceView`.
-- **Audio:** Aggressively shrinks the `AudioTrack` hardware buffer to 20ms and dumps raw PCM bytes straight to the speakers, instantly dropping delayed packets to maintain absolute sync.
+- **Audio:** Bypasses software mixers by shrinking the `AudioTrack` hardware buffer to 20ms and delivering raw PCM bytes directly to the speakers, instantly dropping delayed packets to maintain absolute sync.
 
 ---
 
-## 🛠️ Setup & Installation
+## Setup & Installation
 
 ### Prerequisites
-- **Mac:** macOS 13.0 (Ventura) or later. Xcode installed.
-- **Tablet:** Android 7.0 or later. Developer Options and USB Debugging enabled.
+- **macOS:** macOS 13.0 (Ventura) or later. Xcode installed.
+- **Android:** Android 7.0 or later. Developer Options and USB Debugging enabled.
 - **Tools:** Android SDK Platform-Tools (`adb`) installed on the Mac (`brew install android-platform-tools`).
 
 ### 1. Build the Android App
 1. Open the `android-client` folder in Android Studio.
 2. Connect your tablet via USB.
 3. Build and install the app on your tablet.
-4. Launch the **Argus** app on your tablet (it will show a black screen waiting for a connection).
+4. Launch the **Argus** app on your tablet (it will display a black screen waiting for a connection).
 
 ### 2. Build the macOS App
 1. Open `Argus.xcodeproj` in Xcode.
 2. Build and Run the application.
-3. A menu bar icon (an eye) will appear.
+3. A menu bar icon (Argus logo) will appear in the macOS status bar.
 
-### 3. Connect!
-1. Ensure your tablet is connected via USB and `adb devices` shows your device.
+### 3. Connect
+1. Ensure your tablet is connected via USB and `adb devices` lists your device.
 2. Click the Argus menu bar icon on your Mac and select **Start Streaming**.
-3. Your Mac screen will flash, a new virtual display will be created, and your tablet will instantly light up as a fully functional external monitor!
+3. The Mac screen will flash, a new virtual display will be instantiated, and the tablet will begin rendering the external monitor feed.
 
 ---
 
-## 🔮 Roadmap
+## Roadmap
 
 - [ ] **Wireless Support:** Zero-config wireless streaming over local Wi-Fi via Bonjour/mDNS discovery.
 - [ ] **Touch Input Injection:** Send touch events from the tablet back to the Mac to control the cursor.
@@ -90,10 +90,10 @@ Argus consists of two deeply integrated components communicating over local TCP 
 
 ---
 
-## 📝 License
+## License
 
 Distributed under the MIT License. See `LICENSE` for more information.
 
 <p align="center">
-  <i>Built with ❤️ by Parth Gupta</i>
+  <i>Built by Parth Gupta</i>
 </p>
