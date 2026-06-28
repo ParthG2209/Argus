@@ -34,6 +34,7 @@ final class StreamCoordinator {
     private var videoServer: FrameSocketServer?
     private var audioServer: FrameSocketServer?
     private var inputServer: LineSocketServer?
+    private var advertiser: BonjourAdvertiser?
 
     private var fpsTimer: Timer?
 
@@ -65,7 +66,7 @@ final class StreamCoordinator {
 
         // Build + fully wire all servers BEFORE opening any listener (the
         // tablet may dial in the instant a listener opens).
-        let video = FrameSocketServer(port: ArgusPorts.video, label: "video", maxInFlight: 3)
+        let video = FrameSocketServer(port: ArgusPorts.video, label: "video", maxInFlight: 5)
         let audioSrv = FrameSocketServer(port: ArgusPorts.audio, label: "audio", maxInFlight: 5)
         let input = LineSocketServer(port: ArgusPorts.input, label: "input")
         videoServer = video; audioServer = audioSrv; inputServer = input
@@ -77,6 +78,10 @@ final class StreamCoordinator {
         }
 
         _ = video.start(); _ = audioSrv.start(); _ = input.start()
+        
+        advertiser = BonjourAdvertiser(port: ArgusPorts.video)
+        advertiser?.start()
+        
         _ = adb.setupReverseTunnels()
 
         state.update(status: .connected)
@@ -233,6 +238,7 @@ final class StreamCoordinator {
 
         videoServer?.stop(); audioServer?.stop(); inputServer?.stop()
         videoServer = nil; audioServer = nil; inputServer = nil
+        advertiser?.stop(); advertiser = nil
 
         adb.removeReverseTunnels()
         virtualDisplay.stop()
