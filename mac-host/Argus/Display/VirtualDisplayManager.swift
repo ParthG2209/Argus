@@ -96,9 +96,16 @@ final class VirtualDisplayManager {
     }
 
     func stop() {
-        DispatchQueue.main.async { [weak self] in
-            self?.keepAliveWindow?.close()
-            self?.keepAliveWindow = nil
+        // Must close the window synchronously BEFORE destroying the virtual display,
+        // otherwise macOS crashes trying to update a window on a non-existent screen.
+        if Thread.isMainThread {
+            keepAliveWindow?.close()
+            keepAliveWindow = nil
+        } else {
+            DispatchQueue.main.sync {
+                keepAliveWindow?.close()
+                keepAliveWindow = nil
+            }
         }
         display.destroy()
     }
