@@ -30,6 +30,7 @@ class ConnectionManager(
     enum class Status { DISCONNECTED, CONNECTED, STREAMING }
 
     @Volatile var onStatus: ((Status) -> Unit)? = null
+    @Volatile var wifiHost: String? = null
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var sessionJob: Job? = null
@@ -56,13 +57,30 @@ class ConnectionManager(
             var input: Socket? = null
             var audio: Socket? = null
             try {
-                video = connect(Protocol.PORT_VIDEO)
-                input = connect(Protocol.PORT_INPUT)
-                audio = connect(Protocol.PORT_AUDIO)
+                // Try USB (localhost) first
+                var connectedHost = Protocol.HOST
+                try {
+                    video = connect(Protocol.HOST, Protocol.PORT_VIDEO)
+                    input = connect(Protocol.HOST, Protocol.PORT_INPUT)
+                    audio = connect(Protocol.HOST, Protocol.PORT_AUDIO)
+                } catch (e: Exception) {
+                    // USB failed, try Wi-Fi fallback if available
+                    val fallback = wifiHost
+                    if (fallback != null) {
+                        Log.i(TAG, "USB connection failed, attempting Wi-Fi fallback to $fallback")
+                        closeQuietly(video); closeQuietly(input); closeQuietly(audio)
+                        video = connect(fallback, Protocol.PORT_VIDEO)
+                        input = connect(fallback, Protocol.PORT_INPUT)
+                        audio = connect(fallback, Protocol.PORT_AUDIO)
+                        connectedHost = fallback
+                    } else {
+                        throw e
+                    }
+                }
 
                 // Report our real resolution FIRST so the Mac sizes the
                 // virtual display to match (newline-terminated JSON).
-                val out = input.getOutputStream()
+                val out = input!!.getOutputStream()
                 val hello = "{\"type\":\"hello\",\"width\":$screenWidth,\"height\":$screenHeight," +
                     "\"refresh\":$screenRefresh}\n"
                 out.write(hello.toByteArray(Charsets.UTF_8)); out.flush()
@@ -90,11 +108,11 @@ class ConnectionManager(
         }
     }
 
-    private fun connect(port: Int): Socket {
+    private fun connect(host: String, port: Int): Socket {
         val s = Socket()
         s.tcpNoDelay = true
-        s.connect(InetSocketAddress(Protocol.HOST, port), 3000)
-        Log.i(TAG, "Connected to $port")
+        s.connect(InetSocketAddress(host, port), 3000)
+        Log.i(TAG, "Connected to $host:$port")
         return s
     }
 
@@ -141,15 +159,6 @@ class ConnectionManager(
         val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 1 shl 16))
         while (scope.isActive && active) {
             var frame = readFrame(input) ?: break
-            
-            // Catch-up logic: if the Mac is generating audio slightly faster than
-            // the tablet can play it (clock drift), or if the tablet paused for GC,
-            // latency. Raw PCM is ~1920 bytes per 10ms frame. 
-            // We instantly drop old frames if the buffer has > 2 packets (~20ms).
-            while (input.available() > 4000 && scope.isActive && active) {
-                val nextFrame = readFrame(input) ?: break
-                frame = nextFrame // Keep the freshest frame
-            }
             
             audioPlayer.submitFrame(frame)
         }
