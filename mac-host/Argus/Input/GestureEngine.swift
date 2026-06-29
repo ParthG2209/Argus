@@ -28,6 +28,11 @@ final class GestureEngine {
         var button: String?
     }
     private var pointers: [Int: Pointer] = [:]
+    
+    // ── Double click tracking ───────────────────────────────────────────
+    private var lastClickTime: Int64 = 0
+    private var lastClickPoint: CGPoint = .zero
+    private var currentClickCount: Int64 = 1
 
     // ── Gesture classification ──────────────────────────────────────────
     private enum Phase {
@@ -223,8 +228,23 @@ final class GestureEngine {
             let elapsed = timestamp - ptr.startTime
             if elapsed < longPressMs {
                 // ── TAP → Left Click ────────────────────────────────
-                postMouseEvent(type: .leftMouseDown, pt: ptr.point)
-                postMouseEvent(type: .leftMouseUp,   pt: ptr.point)
+                // Check for double click
+                let clickElapsed = timestamp - lastClickTime
+                let dx = ptr.point.x - lastClickPoint.x
+                let dy = ptr.point.y - lastClickPoint.y
+                let dist = hypot(dx, dy)
+                
+                if clickElapsed < 500 && dist < 10.0 {
+                    currentClickCount += 1
+                } else {
+                    currentClickCount = 1
+                }
+                
+                postMouseEvent(type: .leftMouseDown, pt: ptr.point, clicks: currentClickCount)
+                postMouseEvent(type: .leftMouseUp,   pt: ptr.point, clicks: currentClickCount)
+                
+                lastClickTime = timestamp
+                lastClickPoint = ptr.point
             } else {
                 // ── Long Press → Right Click ────────────────────────
                 postMouseEvent(type: .rightMouseDown, pt: ptr.point)
@@ -285,14 +305,11 @@ final class GestureEngine {
     // ════════════════════════════════════════════════════════════════════
 
     private func evaluateMultiFingerSwipe(count: Int, dx: CGFloat, dy: CGFloat) {
-        if count == 3 {
+        if count == 5 {
             if dy < -swipeThreshold      { postKey(keyCode: kVK_UpArrow, flags: .maskControl) }     // Mission Control
             else if dy > swipeThreshold  { postKey(keyCode: kVK_DownArrow, flags: .maskControl) }   // App Exposé
             else if dx < -swipeThreshold { postKey(keyCode: kVK_RightArrow, flags: .maskControl) }  // Next Space
             else if dx > swipeThreshold  { postKey(keyCode: kVK_LeftArrow, flags: .maskControl) }   // Prev Space
-        } else if count == 4 {
-            if dy > swipeThreshold       { postKey(keyCode: kVK_F11) }  // Show Desktop
-            else if dy < -swipeThreshold { postKey(keyCode: kVK_F4) }   // Launchpad
         }
     }
 
@@ -302,8 +319,14 @@ final class GestureEngine {
 
     private func mapToGlobal(_ x: Double, _ y: Double) -> CGPoint {
         let bounds = CGDisplayBounds(displayID)
+        
+        // Edge snapping for Dock and Menu Bar access
+        var snappedY = y
+        if y < 0.015 { snappedY = 0.0 } // Top ~1.5% snaps to Menu Bar
+        if y > 0.985 { snappedY = 1.0 } // Bottom ~1.5% snaps to Dock
+        
         return CGPoint(x: bounds.origin.x + x * bounds.size.width,
-                       y: bounds.origin.y + y * bounds.size.height)
+                       y: bounds.origin.y + snappedY * bounds.size.height)
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -311,7 +334,7 @@ final class GestureEngine {
     // ════════════════════════════════════════════════════════════════════
 
     private func postMouseEvent(type: CGEventType, pt: CGPoint,
-                                pressure: Double = 0, tiltX: Double = 0, tiltY: Double = 0) {
+                                pressure: Double = 0, tiltX: Double = 0, tiltY: Double = 0, clicks: Int64 = 1) {
         let btn: CGMouseButton =
             (type == .rightMouseDown || type == .rightMouseUp || type == .rightMouseDragged)
             ? .right : .left
@@ -319,6 +342,11 @@ final class GestureEngine {
                                   mouseType: type,
                                   mouseCursorPosition: pt,
                                   mouseButton: btn) else { return }
+        
+        if type == .leftMouseDown || type == .leftMouseUp || type == .rightMouseDown || type == .rightMouseUp {
+            event.setIntegerValueField(.mouseEventClickState, value: clicks)
+        }
+        
         if pressure > 0 {
             event.setDoubleValueField(.tabletEventPointPressure, value: pressure)
         }
