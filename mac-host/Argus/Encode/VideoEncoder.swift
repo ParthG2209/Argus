@@ -98,11 +98,18 @@ final class VideoEncoder {
         }
     }
 
-    /// Live bitrate change (from the Settings slider).
     func updateBitrate(_ bps: Int) {
         bitrate = bps
         guard let session = session else { return }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
+        
+        let byteLimit = bps / 8
+        let limitBytes = byteLimit + (byteLimit / 2)
+        let limits: [NSNumber] = [
+            NSNumber(value: limitBytes), // bytes
+            NSNumber(value: 1)           // seconds
+        ]
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
     }
 
     /// Encode one frame. Optionally force a keyframe (used on first connect).
