@@ -54,20 +54,21 @@ class InputForwarder {
     }
 
     /** Enqueue a batch, applying the rate-limit policy. */
-    fun send(batch: InputBatch) {
-        if (shouldDrop(batch)) return
-        val line = batch.toJsonLine()
+    fun send(frame: InputFrame) {
+        if (shouldDrop(frame)) return
+        val line = frame.toJsonLine()
         val result = channel.trySend(line)
         if (result.isFailure) {
-            Log.v(TAG, "input channel full; dropped ${batch.action}")
+            Log.v(TAG, "input channel full; dropped ${frame.action}")
         }
     }
 
-    private fun shouldDrop(batch: InputBatch): Boolean {
+    private fun shouldDrop(frame: InputFrame): Boolean {
         val now = System.nanoTime()
-        return when (batch.action) {
+        return when (frame.action) {
             "move" -> {
-                if (batch.toolType == "finger") {
+                val hasStylus = frame.pointers.any { it.toolType == "stylus" || it.toolType == "eraser" }
+                if (!hasStylus) {
                     if (now - lastFingerMoveNs < fingerMoveIntervalNs) true
                     else { lastFingerMoveNs = now; false }
                 } else {
@@ -78,7 +79,7 @@ class InputForwarder {
                 if (now - lastHoverNs < hoverIntervalNs) true
                 else { lastHoverNs = now; false }
             }
-            else -> false // down/up/button_* always sent
+            else -> false // down/up/cancel/button_* always sent
         }
     }
 

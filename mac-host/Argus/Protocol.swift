@@ -110,22 +110,22 @@ enum ArgusAudioSpec {
 
 // MARK: - Input event model (decoded from port 7176 JSON)
 
-struct InputPoint: Codable {
+struct InputPointer: Codable {
+    let id: Int
+    let toolType: String
     let x: Double
     let y: Double
     let pressure: Double
     let tiltX: Double
     let tiltY: Double
-    let toolMajor: Double
-    let toolMinor: Double
-    let timestamp: Int64
+    let button: String?
 }
 
 struct InputEvent: Codable {
-    let action: String     // down|move|up|hover|button_press|button_release
-    let toolType: String   // finger|stylus|eraser
-    let button: String?    // primary|secondary|null
-    let points: [InputPoint]
+    let action: String     // down|move|up|cancel|hover|button_press|button_release
+    let actionPointerId: Int
+    let timestamp: Int64
+    let pointers: [InputPointer]
 }
 
 enum ConnectionStatus: String {

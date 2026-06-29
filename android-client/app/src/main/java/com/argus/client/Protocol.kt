@@ -39,46 +39,46 @@ object Handshake {
     }
 }
 
-/** One sampled input point in normalized device space. */
-data class InputPoint(
+/** One active pointer in normalized device space. */
+data class InputPointer(
+    val id: Int,
+    val toolType: String,
     val x: Float,
     val y: Float,
     val pressure: Float,
     val tiltX: Float,
     val tiltY: Float,
-    val toolMajor: Float,
-    val toolMinor: Float,
-    val timestamp: Long,
+    val button: String?
 )
 
-/** A batch of points belonging to one MotionEvent dispatch. */
-data class InputBatch(
+/** A single frame of input containing all active pointers. */
+data class InputFrame(
     val action: String,
-    val toolType: String,
-    val button: String?,
-    val points: List<InputPoint>,
+    val actionPointerId: Int,
+    val timestamp: Long,
+    val pointers: List<InputPointer>,
 ) {
     /** Serialize to the newline-terminated JSON wire form, by hand for speed. */
     fun toJsonLine(): String {
-        val sb = StringBuilder(64 + points.size * 96)
+        val sb = StringBuilder(64 + pointers.size * 128)
         sb.append('{')
         sb.append("\"action\":\"").append(action).append("\",")
-        sb.append("\"toolType\":\"").append(toolType).append("\",")
-        if (button == null) sb.append("\"button\":null,")
-        else sb.append("\"button\":\"").append(button).append("\",")
-        sb.append("\"points\":[")
-        for (i in points.indices) {
-            val p = points[i]
+        sb.append("\"actionPointerId\":").append(actionPointerId).append(",")
+        sb.append("\"timestamp\":").append(timestamp).append(",")
+        sb.append("\"pointers\":[")
+        for (i in pointers.indices) {
+            val p = pointers[i]
             if (i > 0) sb.append(',')
             sb.append('{')
+            sb.append("\"id\":").append(p.id).append(',')
+            sb.append("\"toolType\":\"").append(p.toolType).append("\",")
             sb.append("\"x\":").append(fmt(p.x)).append(',')
             sb.append("\"y\":").append(fmt(p.y)).append(',')
             sb.append("\"pressure\":").append(fmt(p.pressure)).append(',')
             sb.append("\"tiltX\":").append(fmt(p.tiltX)).append(',')
-            sb.append("\"tiltY\":").append(fmt(p.tiltY)).append(',')
-            sb.append("\"toolMajor\":").append(fmt(p.toolMajor)).append(',')
-            sb.append("\"toolMinor\":").append(fmt(p.toolMinor)).append(',')
-            sb.append("\"timestamp\":").append(p.timestamp)
+            sb.append("\"tiltY\":").append(fmt(p.tiltY))
+            if (p.button == null) sb.append(",\"button\":null")
+            else sb.append(",\"button\":\"").append(p.button).append("\"")
             sb.append('}')
         }
         sb.append("]}")

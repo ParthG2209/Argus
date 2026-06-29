@@ -90,73 +90,93 @@ class StreamSurfaceView @JvmOverloads constructor(
 
     private fun handleMotion(event: MotionEvent): Boolean {
         val action = when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> "down"
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> "down"
             MotionEvent.ACTION_MOVE -> "move"
-            MotionEvent.ACTION_UP -> "up"
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> "up"
+            MotionEvent.ACTION_CANCEL -> "cancel"
             MotionEvent.ACTION_HOVER_MOVE -> "hover"
             MotionEvent.ACTION_BUTTON_PRESS -> "button_press"
             MotionEvent.ACTION_BUTTON_RELEASE -> "button_release"
             else -> return false
         }
 
-        val toolType = when (event.getToolType(0)) {
-            MotionEvent.TOOL_TYPE_STYLUS -> "stylus"
-            MotionEvent.TOOL_TYPE_ERASER -> "eraser"
-            else -> "finger"
-        }
-
-        val button = when {
-            event.isButtonPressed(MotionEvent.BUTTON_STYLUS_PRIMARY) -> "primary"
-            event.isButtonPressed(MotionEvent.BUTTON_STYLUS_SECONDARY) -> "secondary"
-            else -> null
-        }
+        // The pointer that triggered this action (meaningful for down/up)
+        val actionPointerId = event.getPointerId(event.actionIndex)
 
         val w = width.toFloat().coerceAtLeast(1f)
         val h = height.toFloat().coerceAtLeast(1f)
-        val points = ArrayList<InputPoint>(event.historySize + 1)
 
-        // Flush historical (batched) intermediate samples first, oldest first.
-        for (i in 0 until event.historySize) {
-            points.add(
-                InputPoint(
-                    x = event.getHistoricalX(i) / w,
-                    y = event.getHistoricalY(i) / h,
-                    pressure = event.getHistoricalPressure(i),
-                    tiltX = event.getHistoricalAxisValue(MotionEvent.AXIS_TILT, i),
-                    tiltY = event.getHistoricalAxisValue(MotionEvent.AXIS_ORIENTATION, i),
-                    toolMajor = event.getHistoricalAxisValue(MotionEvent.AXIS_TOOL_MAJOR, i),
-                    toolMinor = event.getHistoricalAxisValue(MotionEvent.AXIS_TOOL_MINOR, i),
-                    timestamp = event.getHistoricalEventTime(i),
+        // 1. Flush historical (batched) intermediate samples first.
+        // History is only present for ACTION_MOVE and ACTION_HOVER_MOVE.
+        if ((action == "move" || action == "hover") && event.historySize > 0) {
+            for (hIdx in 0 until event.historySize) {
+                val ptrs = ArrayList<InputPointer>(event.pointerCount)
+                for (pIdx in 0 until event.pointerCount) {
+                    ptrs.add(
+                        InputPointer(
+                            id = event.getPointerId(pIdx),
+                            toolType = getToolType(event, pIdx),
+                            x = event.getHistoricalX(pIdx, hIdx) / w,
+                            y = event.getHistoricalY(pIdx, hIdx) / h,
+                            pressure = event.getHistoricalPressure(pIdx, hIdx),
+                            tiltX = event.getHistoricalAxisValue(MotionEvent.AXIS_TILT, pIdx, hIdx),
+                            tiltY = event.getHistoricalAxisValue(MotionEvent.AXIS_ORIENTATION, pIdx, hIdx),
+                            button = getButton(event)
+                        )
+                    )
+                }
+                forwarder?.send(InputFrame(action, actionPointerId, event.getHistoricalEventTime(hIdx), ptrs))
+            }
+        }
+
+        // 2. Process current sample.
+        val ptrs = ArrayList<InputPointer>(event.pointerCount)
+        for (pIdx in 0 until event.pointerCount) {
+            ptrs.add(
+                InputPointer(
+                    id = event.getPointerId(pIdx),
+                    toolType = getToolType(event, pIdx),
+                    x = event.getX(pIdx) / w,
+                    y = event.getY(pIdx) / h,
+                    pressure = event.getPressure(pIdx),
+                    tiltX = event.getAxisValue(MotionEvent.AXIS_TILT, pIdx),
+                    tiltY = event.getAxisValue(MotionEvent.AXIS_ORIENTATION, pIdx),
+                    button = getButton(event)
                 )
             )
         }
-        // Then the current sample.
-        points.add(
-            InputPoint(
-                x = event.x / w,
-                y = event.y / h,
-                pressure = event.pressure,
-                tiltX = event.getAxisValue(MotionEvent.AXIS_TILT),
-                tiltY = event.getAxisValue(MotionEvent.AXIS_ORIENTATION),
-                toolMajor = event.getAxisValue(MotionEvent.AXIS_TOOL_MAJOR),
-                toolMinor = event.getAxisValue(MotionEvent.AXIS_TOOL_MINOR),
-                timestamp = event.eventTime,
-            )
-        )
+        forwarder?.send(InputFrame(action, actionPointerId, event.eventTime, ptrs))
 
-        forwarder?.send(InputBatch(action, toolType, button, points))
-
+        // UI reporting (just take the first pointer to show what's active)
+        val firstTool = getToolType(event, 0)
         val mode = when {
             action == "hover" -> InputMode.HOVER
-            toolType == "stylus" -> InputMode.STYLUS
-            toolType == "eraser" -> InputMode.ERASER
+            firstTool == "stylus" -> InputMode.STYLUS
+            firstTool == "eraser" -> InputMode.ERASER
             else -> InputMode.FINGER
         }
         onInput?.invoke(mode, event.pressure)
         return true
+    }
+    
+    private fun getToolType(event: MotionEvent, pIdx: Int): String {
+        return when (event.getToolType(pIdx)) {
+            MotionEvent.TOOL_TYPE_STYLUS -> "stylus"
+            MotionEvent.TOOL_TYPE_ERASER -> "eraser"
+            else -> "finger"
+        }
+    }
+    
+    private fun getButton(event: MotionEvent): String? {
+        return when {
+            event.isButtonPressed(MotionEvent.BUTTON_STYLUS_PRIMARY) -> "primary"
+            event.isButtonPressed(MotionEvent.BUTTON_STYLUS_SECONDARY) -> "secondary"
+            else -> null
+        }
     }
 }
 
 enum class InputMode(val label: String) {
     FINGER("Finger"), STYLUS("Stylus"), ERASER("Eraser"), HOVER("Hover")
 }
+
