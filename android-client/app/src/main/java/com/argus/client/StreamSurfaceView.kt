@@ -108,26 +108,10 @@ class StreamSurfaceView @JvmOverloads constructor(
 
         // 1. Flush historical (batched) intermediate samples first.
         // History is only present for ACTION_MOVE and ACTION_HOVER_MOVE.
-        if ((action == "move" || action == "hover") && event.historySize > 0) {
-            for (hIdx in 0 until event.historySize) {
-                val ptrs = ArrayList<InputPointer>(event.pointerCount)
-                for (pIdx in 0 until event.pointerCount) {
-                    ptrs.add(
-                        InputPointer(
-                            id = event.getPointerId(pIdx),
-                            toolType = getToolType(event, pIdx),
-                            x = event.getHistoricalX(pIdx, hIdx) / w,
-                            y = event.getHistoricalY(pIdx, hIdx) / h,
-                            pressure = event.getHistoricalPressure(pIdx, hIdx),
-                            tiltX = event.getHistoricalAxisValue(MotionEvent.AXIS_TILT, pIdx, hIdx),
-                            tiltY = event.getHistoricalAxisValue(MotionEvent.AXIS_ORIENTATION, pIdx, hIdx),
-                            button = getButton(event)
-                        )
-                    )
-                }
-                forwarder?.send(InputFrame(action, actionPointerId, event.getHistoricalEventTime(hIdx), ptrs))
-            }
-        }
+        // NOTE: We intentionally skip sending historical events for touch navigation. 
+        // Sending 300+ injected CGEvents per second floods the macOS WindowServer 
+        // and causes severe stuttering/lag during window drags. 
+        // The display refresh rate (e.g. 120Hz) provides enough samples for smooth movement.
 
         // 2. Process current sample.
         val ptrs = ArrayList<InputPointer>(event.pointerCount)
