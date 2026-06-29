@@ -15,7 +15,8 @@ final class VirtualDisplayManager {
     private var nativeWidth = ArgusDisplaySpec.fallbackWidth
     private var nativeHeight = ArgusDisplaySpec.fallbackHeight
     private var currentRefreshHz: Double = 60.0
-    private var keepAliveWindow: NSWindow?
+    private var keepAliveWindow: KeepAliveWindow?
+    private var stopped = false
 
     var displayID: CGDirectDisplayID { display.displayID }
     var isActive: Bool { display.isActive }
@@ -30,6 +31,7 @@ final class VirtualDisplayManager {
         nativeWidth = w
         nativeHeight = h
         currentRefreshHz = refreshHz
+        stopped = false
 
         let presets = ArgusDisplaySpec.scalingPresets
         // Mode dimensions are POINTS; the bridge derives the 2x backing.
@@ -77,7 +79,8 @@ final class VirtualDisplayManager {
             
             // Spawn the invisible keep-alive window on the main thread
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.spawnKeepAliveWindow(displayID: did)
+                guard let self, !self.stopped else { return }
+                self.spawnKeepAliveWindow(displayID: did)
             }
         } else {
             NSLog("[Argus] WARNING: Async mode set failed after 2s. macOS may use default refresh rate.")
@@ -96,29 +99,16 @@ final class VirtualDisplayManager {
     }
 
     func stop() {
-        // 1. Kill the keep-alive window's animation and remove it from screen.
-        //    This MUST happen synchronously on the main thread so CoreAnimation's
-        //    render server stops referencing the virtual display's
-        //    CAContext before we destroy it.
-        let teardown = { [weak self] in
-            guard let self else { return }
-            if let w = self.keepAliveWindow as? KeepAliveWindow {
-                w.prepareForClose()
-            }
-            self.keepAliveWindow?.orderOut(nil)
-            self.keepAliveWindow?.close()
-            self.keepAliveWindow = nil
-        }
+        stopped = true
         
-        if Thread.isMainThread {
-            teardown()
-        } else {
-            DispatchQueue.main.sync { teardown() }
-        }
+        // Invalidate the timer first — this is synchronous and immediate,
+        // guaranteeing no more timer callbacks can fire.
+        keepAliveWindow?.stopKeepAlive()
+        keepAliveWindow?.orderOut(nil)
+        keepAliveWindow = nil
         
-        // 2. Defer display destruction long enough for the WindowServer to fully
-        //    flush the removed window/layer from its render tree. A single
-        //    runloop tick isn't enough — CALocalDisplayUpdateBlock can lag behind.
+        // Destroy the display after the WindowServer has had time to flush
+        // the removed window from its render tree.
         let d = display
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             d.destroy()
@@ -139,7 +129,7 @@ final class VirtualDisplayManager {
         let screenRect = targetScreen?.frame ?? NSRect(x: 10000, y: 10000, width: 1, height: 1)
         let tinyRect = NSRect(x: screenRect.minX, y: screenRect.minY, width: 1, height: 1)
         
-        let window = KeepAliveWindow(contentRect: tinyRect, displayID: displayID)
+        let window = KeepAliveWindow(contentRect: tinyRect)
         window.orderFront(nil)
         self.keepAliveWindow = window
         NSLog("[Argus] KeepAliveWindow spawned to lock refresh rate.")
@@ -147,9 +137,18 @@ final class VirtualDisplayManager {
 }
 
 // MARK: - KeepAliveWindow
+//
+// Uses a plain Timer to toggle the layer's background color.
+// Unlike CABasicAnimation (which lives in the CoreAnimation render server and
+// survives window.close()), a Timer is trivially cancelled with .invalidate()
+// — no lingering render-server references that crash when the virtual display
+// is destroyed.
 
 final class KeepAliveWindow: NSWindow {
-    init(contentRect: NSRect, displayID: CGDirectDisplayID) {
+    private var timer: Timer?
+    private var toggle = false
+    
+    init(contentRect: NSRect) {
         super.init(contentRect: contentRect,
                    styleMask: .borderless,
                    backing: .buffered,
@@ -161,27 +160,31 @@ final class KeepAliveWindow: NSWindow {
         self.ignoresMouseEvents = true
         self.level = .floating
         self.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        self.isReleasedWhenClosed = false
         
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
         view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor(white: 0.5, alpha: 0.01).cgColor
         self.contentView = view
         
-        // Attach a continuous CoreAnimation to force the WindowServer to composite
-        // the display at maximum refresh rate without flooding the main thread.
-        let anim = CABasicAnimation(keyPath: "backgroundColor")
-        anim.fromValue = NSColor(white: 0.5, alpha: 0.01).cgColor
-        anim.toValue = NSColor(white: 0.5, alpha: 0.02).cgColor
-        anim.duration = 0.5
-        anim.autoreverses = true
-        anim.repeatCount = .infinity
-        view.layer?.add(anim, forKey: "keepAlive")
+        // Toggle the layer's background color at ~30 Hz to force the
+        // WindowServer to composite the display continuously.
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.toggle.toggle()
+            self.contentView?.layer?.backgroundColor = self.toggle
+                ? NSColor(white: 0.5, alpha: 0.02).cgColor
+                : NSColor(white: 0.5, alpha: 0.01).cgColor
+        }
     }
     
-    /// Remove all CoreAnimation activity before the window is torn down.
-    /// Must be called on the main thread.
-    func prepareForClose() {
-        contentView?.layer?.removeAllAnimations()
-        contentView?.layer?.backgroundColor = nil
-        contentView = nil
+    /// Cleanly stop the timer. Safe to call multiple times.
+    func stopKeepAlive() {
+        timer?.invalidate()
+        timer = nil
+    }
+    
+    deinit {
+        timer?.invalidate()
     }
 }
