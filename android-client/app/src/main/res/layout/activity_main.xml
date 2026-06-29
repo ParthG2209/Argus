@@ -11,6 +11,17 @@
         android:layout_height="match_parent"
         android:layout_gravity="center" />
 
+    <!-- Cooling Filter: Adds a subtle blue tint to neutralize overly warm tablet displays -->
+    <!-- Opacity is 5% (#0C), Color is deep blue (#0044FF) -->
+    <!-- Events pass through to StreamSurfaceView since it's not clickable -->
+    <View
+        android:id="@+id/coolingFilter"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#0C0044FF"
+        android:clickable="false"
+        android:focusable="false" />
+
     <TextView
         android:id="@+id/statusOverlay"
         android:layout_width="wrap_content"
