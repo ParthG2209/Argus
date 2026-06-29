@@ -128,13 +128,8 @@ final class StreamCoordinator {
         var streamW = Double(nativeW)
         var streamH = Double(nativeH)
         
-        // Cap the stream to a max of 2880 pixels wide to guarantee 120fps hardware encode
-        // without severely impacting visual sharpness.
-        if streamW > 2880 {
-            let scale = 2880.0 / streamW
-            streamW = 2880.0
-            streamH = streamH * scale
-        }
+        // Let the stream encode at full native resolution for maximum sharpness.
+        // We previously capped at 2880, causing an upscale blur on high-res displays.
         
         let finalStreamW = evenInt(streamW)
         let finalStreamH = evenInt(streamH)
