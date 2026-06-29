@@ -96,24 +96,31 @@ final class VirtualDisplayManager {
     }
 
     func stop() {
-        // Must close the window synchronously BEFORE destroying the virtual display,
-        // otherwise macOS crashes trying to update a window on a non-existent screen.
-        if Thread.isMainThread {
-            keepAliveWindow?.close()
-            keepAliveWindow = nil
-        } else {
-            DispatchQueue.main.sync {
-                keepAliveWindow?.close()
-                keepAliveWindow = nil
+        // 1. Kill the keep-alive window's animation and remove it from screen.
+        //    This MUST happen synchronously on the main thread so CoreAnimation's
+        //    render server stops referencing the virtual display's
+        //    CAContext before we destroy it.
+        let teardown = { [weak self] in
+            guard let self else { return }
+            if let w = self.keepAliveWindow as? KeepAliveWindow {
+                w.prepareForClose()
             }
+            self.keepAliveWindow?.orderOut(nil)
+            self.keepAliveWindow?.close()
+            self.keepAliveWindow = nil
         }
         
-        // Defer display destruction to the NEXT runloop tick.
-        // `close()` queues a window removal to the WindowServer. If we destroy 
-        // the display in the exact same runloop tick, the WindowServer crashes 
-        // because the window is technically still registered on a dead screen.
+        if Thread.isMainThread {
+            teardown()
+        } else {
+            DispatchQueue.main.sync { teardown() }
+        }
+        
+        // 2. Defer display destruction long enough for the WindowServer to fully
+        //    flush the removed window/layer from its render tree. A single
+        //    runloop tick isn't enough — CALocalDisplayUpdateBlock can lag behind.
         let d = display
-        DispatchQueue.main.async {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             d.destroy()
         }
     }
@@ -152,7 +159,7 @@ final class KeepAliveWindow: NSWindow {
         self.isOpaque = false
         self.hasShadow = false
         self.ignoresMouseEvents = true
-        self.level = .floating // Ensure it stays on top
+        self.level = .floating
         self.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
@@ -168,5 +175,13 @@ final class KeepAliveWindow: NSWindow {
         anim.autoreverses = true
         anim.repeatCount = .infinity
         view.layer?.add(anim, forKey: "keepAlive")
+    }
+    
+    /// Remove all CoreAnimation activity before the window is torn down.
+    /// Must be called on the main thread.
+    func prepareForClose() {
+        contentView?.layer?.removeAllAnimations()
+        contentView?.layer?.backgroundColor = nil
+        contentView = nil
     }
 }

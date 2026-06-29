@@ -260,7 +260,7 @@ final class StreamCoordinator {
         state.codec = codecName
         if state.status != .disconnected {
             disconnect()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.connect()
             }
         }
@@ -276,7 +276,7 @@ final class StreamCoordinator {
     private func reconnectIfStreaming() {
         if state.status != .disconnected {
             disconnect()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.connect()
             }
         }
