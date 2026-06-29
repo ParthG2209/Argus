@@ -101,21 +101,43 @@ class MainActivity : AppCompatActivity() {
         connection = conn
     }
 
-    /** Detect the full panel resolution in landscape (w >= h). */
+    /** Detect the true physical panel resolution in landscape (w >= h). */
     private fun detectScreenSize() {
-        var w: Int
-        var h: Int
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            val bounds = windowManager.currentWindowMetrics.bounds
-            w = bounds.width(); h = bounds.height()
-        } else {
-            val dm = android.util.DisplayMetrics()
-            @Suppress("DEPRECATION") windowManager.defaultDisplay.getRealMetrics(dm)
-            w = dm.widthPixels; h = dm.heightPixels
+        var w = 0
+        var h = 0
+        val disp = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) display
+                   else @Suppress("DEPRECATION") windowManager.defaultDisplay
+        val modes = disp?.supportedModes ?: emptyArray()
+        
+        var maxRes = 0
+        for (mode in modes) {
+            val res = mode.physicalWidth * mode.physicalHeight
+            if (res > maxRes) {
+                maxRes = res
+                w = mode.physicalWidth
+                h = mode.physicalHeight
+            }
         }
+        
+        // Fallback if modes fail
+        if (maxRes == 0) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                val bounds = windowManager.maximumWindowMetrics.bounds
+                w = bounds.width(); h = bounds.height()
+            } else {
+                val dm = android.util.DisplayMetrics()
+                @Suppress("DEPRECATION") windowManager.defaultDisplay.getRealMetrics(dm)
+                w = dm.widthPixels; h = dm.heightPixels
+            }
+        }
+
         if (h > w) { val t = w; w = h; h = t }   // force landscape
         screenW = w; screenH = h
-        android.util.Log.i("ArgusVideo", "Detected panel resolution ${screenW}x${screenH}")
+        
+        // LOCK the surface buffer to the exact physical resolution to prevent fractional scaling
+        binding.surfaceView.holder.setFixedSize(screenW, screenH)
+        
+        android.util.Log.i("ArgusVideo", "Detected physical panel resolution ${screenW}x${screenH}")
     }
 
     private var displayModes: List<android.view.Display.Mode> = emptyList()
@@ -212,6 +234,11 @@ class MainActivity : AppCompatActivity() {
     // MARK: - Immersive full-screen
 
     private fun hideSystemUi() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            window.attributes.layoutInDisplayCutoutMode = 
+                android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             window.setDecorFitsSystemWindows(false)
             window.insetsController?.let {
