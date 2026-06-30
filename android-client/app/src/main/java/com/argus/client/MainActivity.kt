@@ -170,7 +170,7 @@ class MainActivity : AppCompatActivity() {
         
         // Reconnect to inform the Mac of the new native refresh rate.
         teardownPipeline()
-        binding.surfaceView.holder.surface?.let { onSurfaceReady(it) }
+        binding.surfaceView.holder.surface?.let { startDecoderAndConnection(it) }
     }
 
     private fun teardownPipeline() {
