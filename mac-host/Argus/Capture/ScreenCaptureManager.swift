@@ -133,7 +133,8 @@ final class CGDisplayStreamManager {
     func start() {
         let properties: [CFString: Any] = [
             CGDisplayStream.showCursor: true,
-            CGDisplayStream.colorSpace: CGColorSpaceCreateDeviceRGB()
+            CGDisplayStream.colorSpace: CGColorSpaceCreateDeviceRGB(),
+            CGDisplayStream.yCbCrMatrix: CGDisplayStream.yCbCrMatrix_ITU_R_709_2
         ]
         
         let handler: CGDisplayStreamFrameAvailableHandler = { [weak self] status, displayTime, surface, update in

@@ -81,16 +81,20 @@ final class VideoEncoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: frameRate as CFNumber)
 
-        // Enforce a strict hardware bitrate limit to prevent massive spikes during 
-        // Mission Control animations (which choke Wi-Fi and cause jitter).
-        // Limit burst rate to 1.5x the average bitrate over a 1-second window.
+        // Enforce a hardware bitrate limit, but allow a massive 4x burst limit 
+        // to prevent the encoder from blurring text during complex scrolling.
         let byteLimit = bitrate / 8
-        let limitBytes = byteLimit + (byteLimit / 2)
+        let limitBytes = byteLimit * 4
         let limits: [NSNumber] = [
             NSNumber(value: limitBytes), // bytes
             NSNumber(value: 1)           // seconds
         ]
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
+        
+        // The Silver Bullet: Hard quality floor.
+        // Prevents the encoder from exceeding QP 25. If the 4x burst limit is hit,
+        // it will drop frames instead of permanently blurring the screen.
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: 25 as CFNumber)
 
         if codec == .h264 {   // CABAC is an H.264-only property
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode,
@@ -104,7 +108,7 @@ final class VideoEncoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
         
         let byteLimit = bps / 8
-        let limitBytes = byteLimit + (byteLimit / 2)
+        let limitBytes = byteLimit * 4
         let limits: [NSNumber] = [
             NSNumber(value: limitBytes), // bytes
             NSNumber(value: 1)           // seconds

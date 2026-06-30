@@ -38,8 +38,8 @@ class MainActivity : AppCompatActivity() {
     private val ui = Handler(Looper.getMainLooper())
     private var overlayVisible = true
 
-    // Real panel resolution (landscape), detected at launch and reported to
-    // the Mac so it sizes the virtual display to match (no black bars).
+    // Real panel resolution (landscape), detected from actual layout size
+    // to guarantee 1:1 mapping even if system UI is partially visible.
     private var screenW = 0
     private var screenH = 0
     private var screenRefresh = 144   // panel refresh (Hz), for clean-divisor pacing
@@ -52,15 +52,47 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         hideSystemUi()
 
-        detectScreenSize()
         selectHighRefreshMode()
-        binding.surfaceView.setStreamAspect(screenW, screenH)
+        
         binding.surfaceView.forwarder = inputForwarder
         binding.surfaceView.onInput = { tool, pressure ->
             lastTool = tool
             lastPressure = pressure
         }
-        binding.surfaceView.onSurfaceReady = { surface -> onSurfaceReady(surface) }
+        
+        var isLayoutReady = false
+        var isSurfaceReady = false
+        var activeSurface: Surface? = null
+        
+        val checkStartConnection = {
+            if (isLayoutReady && isSurfaceReady && activeSurface != null) {
+                startDecoderAndConnection(activeSurface!!)
+            }
+        }
+        
+        binding.surfaceView.viewTreeObserver.addOnGlobalLayoutListener(object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                binding.surfaceView.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                var w = binding.root.width
+                var h = binding.root.height
+                if (h > w) { val t = w; w = h; h = t }
+                
+                screenW = w
+                screenH = h
+                binding.surfaceView.setStreamAspect(w, h)
+                binding.surfaceView.holder.setFixedSize(w, h)
+                android.util.Log.i("ArgusVideo", "True 1:1 layout map: ${w}x${h}")
+                
+                isLayoutReady = true
+                checkStartConnection()
+            }
+        })
+        
+        binding.surfaceView.onSurfaceReady = { surface -> 
+            activeSurface = surface
+            isSurfaceReady = true
+            checkStartConnection()
+        }
         binding.surfaceView.onSurfaceDestroyed = { teardownPipeline() }
 
         // Tap the overlay to toggle its visibility.
@@ -85,7 +117,7 @@ class MainActivity : AppCompatActivity() {
         discoveryManager?.startDiscovery()
     }
 
-    private fun onSurfaceReady(surface: Surface) {
+    private fun startDecoderAndConnection(surface: Surface) {
         if (decoder != null) return
         // Don't start the decoder yet — ConnectionManager starts it once the
         // codec handshake (H.264 / H.265) arrives on the video socket.
@@ -101,44 +133,7 @@ class MainActivity : AppCompatActivity() {
         connection = conn
     }
 
-    /** Detect the true physical panel resolution in landscape (w >= h). */
-    private fun detectScreenSize() {
-        var w = 0
-        var h = 0
-        val disp = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) display
-                   else @Suppress("DEPRECATION") windowManager.defaultDisplay
-        val modes = disp?.supportedModes ?: emptyArray()
-        
-        var maxRes = 0
-        for (mode in modes) {
-            val res = mode.physicalWidth * mode.physicalHeight
-            if (res > maxRes) {
-                maxRes = res
-                w = mode.physicalWidth
-                h = mode.physicalHeight
-            }
-        }
-        
-        // Fallback if modes fail
-        if (maxRes == 0) {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                val bounds = windowManager.maximumWindowMetrics.bounds
-                w = bounds.width(); h = bounds.height()
-            } else {
-                val dm = android.util.DisplayMetrics()
-                @Suppress("DEPRECATION") windowManager.defaultDisplay.getRealMetrics(dm)
-                w = dm.widthPixels; h = dm.heightPixels
-            }
-        }
-
-        if (h > w) { val t = w; w = h; h = t }   // force landscape
-        screenW = w; screenH = h
-        
-        // LOCK the surface buffer to the exact physical resolution to prevent fractional scaling
-        binding.surfaceView.holder.setFixedSize(screenW, screenH)
-        
-        android.util.Log.i("ArgusVideo", "Detected physical panel resolution ${screenW}x${screenH}")
-    }
+    // Removed detectScreenSize as it's now handled by the layout listener
 
     private var displayModes: List<android.view.Display.Mode> = emptyList()
     private var currentModeIndex = 0
