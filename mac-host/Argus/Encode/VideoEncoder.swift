@@ -19,6 +19,7 @@ final class VideoEncoder {
     private let width: Int32
     private let height: Int32
     private var bitrate: Int
+    private var isUSB: Bool = false
     private let codec: VideoCodec
     private let frameRate: Int
 
@@ -78,23 +79,24 @@ final class VideoEncoder {
         // for one whenever a frame is actually dropped (see VideoPipeline).
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
                              value: (frameRate * 5) as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
+        let actualBitrate = isUSB ? 150_000_000 : bitrate
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: actualBitrate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: frameRate as CFNumber)
 
-        // Enforce a hardware bitrate limit, but allow a massive 4x burst limit 
-        // to prevent the encoder from blurring text during complex scrolling.
-        let byteLimit = bitrate / 8
-        let limitBytes = byteLimit * 4
+        // Enforce a hardware bitrate limit. 
+        // Allow a massive 4x burst limit for USB, but only 1.5x for Wi-Fi to prevent jitter.
+        let byteLimit = actualBitrate / 8
+        let limitBytes = isUSB ? byteLimit * 4 : Int(Double(byteLimit) * 1.5)
         let limits: [NSNumber] = [
             NSNumber(value: limitBytes), // bytes
             NSNumber(value: 1)           // seconds
         ]
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
         
-        // The Silver Bullet: Hard quality floor.
-        // Prevents the encoder from exceeding QP 25. If the 4x burst limit is hit,
-        // it will drop frames instead of permanently blurring the screen.
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: 25 as CFNumber)
+        // Hard quality floor.
+        // Prevents the encoder from exceeding QP 25 on USB. On Wi-Fi, relax it to 35 to prevent lag spikes.
+        let maxQP = isUSB ? 25 : 35
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: maxQP as CFNumber)
 
         if codec == .h264 {   // CABAC is an H.264-only property
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode,
@@ -102,18 +104,29 @@ final class VideoEncoder {
         }
     }
 
+    func setUSBMode(_ usb: Bool) {
+        if self.isUSB == usb { return }
+        self.isUSB = usb
+        updateBitrate(self.bitrate)
+    }
+
     func updateBitrate(_ bps: Int) {
         bitrate = bps
         guard let session = session else { return }
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
         
-        let byteLimit = bps / 8
-        let limitBytes = byteLimit * 4
+        let actualBitrate = isUSB ? 150_000_000 : bitrate
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: actualBitrate as CFNumber)
+        
+        let byteLimit = actualBitrate / 8
+        let limitBytes = isUSB ? byteLimit * 4 : Int(Double(byteLimit) * 1.5)
         let limits: [NSNumber] = [
             NSNumber(value: limitBytes), // bytes
             NSNumber(value: 1)           // seconds
         ]
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
+        
+        let maxQP = isUSB ? 25 : 35
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: maxQP as CFNumber)
     }
 
     /// Encode one frame. Optionally force a keyframe (used on first connect).
