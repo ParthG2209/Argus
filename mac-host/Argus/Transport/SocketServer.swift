@@ -83,7 +83,7 @@ final class FrameSocketServer {
     var connectFrame: (() -> Data)?
 
     /// Called when a client connects (after the connect frame is written).
-    var onClientConnected: (() -> Void)?
+    var onClientConnected: ((Bool) -> Void)?
     var onClientDisconnected: (() -> Void)?
     /// Called when a frame is dropped due to backpressure (maxInFlight).
     var onFrameDropped: (() -> Void)?
@@ -113,7 +113,13 @@ final class FrameSocketServer {
 
     private func acceptLoop() {
         while running {
-            let fd = accept(listenFD, nil, nil)
+            var clientAddr = sockaddr_in()
+            var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let fd = withUnsafeMutablePointer(to: &clientAddr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                    accept(listenFD, sockaddrPtr, &addrLen)
+                }
+            }
             if fd < 0 {
                 if !running { break }
                 usleep(100_000)
@@ -140,8 +146,9 @@ final class FrameSocketServer {
             }
 
             clientFD = fd
-            NSLog("[Argus] FrameSocketServer(\(port)) client connected.")
-            onClientConnected?()
+            let isUSB = String(cString: inet_ntoa(clientAddr.sin_addr)) == "127.0.0.1"
+            NSLog("[Argus] FrameSocketServer(\(port)) client connected. isUSB: \(isUSB)")
+            onClientConnected?(isUSB)
         }
     }
 
@@ -163,23 +170,31 @@ final class FrameSocketServer {
         writeQueue.async { [weak self] in
             guard let self else { return }
             defer { if self.maxInFlight > 0 { self.inFlight.withLock { $0 -= 1 } } }
-            guard self.clientFD >= 0 else { return }
+            
+            let fd = self.clientFD
+            guard fd >= 0 else { return }
             var header = UInt32(frame.count).bigEndian
             var packet = Data(bytes: &header, count: 4)
             packet.append(frame)
-            if !writeAll(self.clientFD, packet) {
+            if !writeAll(fd, packet) {
                 NSLog("[Argus] FrameSocketServer(\(self.port)) write failed; dropping client.")
-                close(self.clientFD)
-                self.clientFD = -1
-                self.onClientDisconnected?()
+                if self.clientFD == fd {
+                    close(fd)
+                    self.clientFD = -1
+                    self.onClientDisconnected?()
+                }
             }
         }
     }
 
     func stop() {
         running = false
-        if clientFD >= 0 { close(clientFD); clientFD = -1 }
+        disconnectClient()
         if listenFD >= 0 { close(listenFD); listenFD = -1 }
+    }
+
+    func disconnectClient() {
+        if clientFD >= 0 { close(clientFD); clientFD = -1 }
     }
 }
 
@@ -249,7 +264,11 @@ final class LineSocketServer {
 
     func stop() {
         running = false
-        if clientFD >= 0 { close(clientFD); clientFD = -1 }
+        disconnectClient()
         if listenFD >= 0 { close(listenFD); listenFD = -1 }
+    }
+
+    func disconnectClient() {
+        if clientFD >= 0 { close(clientFD); clientFD = -1 }
     }
 }
