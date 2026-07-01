@@ -17,6 +17,7 @@ final class AppState: ObservableObject {
     @Published var bitrateMbps: Double = 15.0
     @Published var inputMode: InputMode = .none
     @Published var stylusPressure: Double = 0.0
+    @Published var isUSB: Bool = false
 
     // Auto-detected tablet resolution + panel refresh (set when streaming begins).
     @Published var tabletWidth: Int = ArgusDisplaySpec.fallbackWidth
@@ -51,6 +52,8 @@ final class AppState: ObservableObject {
     func update(fps: Int) { self.fps = fps }
     func update(inputMode: InputMode, pressure: Double = 0.0) {
         self.inputMode = inputMode
+        self.inputMode = inputMode
         self.stylusPressure = pressure
     }
+    func update(isUSB: Bool) { self.isUSB = isUSB }
 }

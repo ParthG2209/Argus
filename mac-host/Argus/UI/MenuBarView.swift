@@ -43,7 +43,15 @@ struct MenuBarView: View {
                 }
                 GridRow {
                     Text("Bitrate").foregroundStyle(.secondary)
-                    Text(String(format: "%.0f Mbps", state.bitrateSetting))
+                    Text(String(format: "%.0f Mbps", state.isUSB ? 150.0 : state.bitrateSetting))
+                }
+                GridRow {
+                    Text("Mode").foregroundStyle(.secondary)
+                    if state.isUSB {
+                        Text("Wired").foregroundColor(.green)
+                    } else {
+                        Text("Wireless").foregroundColor(.blue)
+                    }
                 }
                 GridRow {
                     Text("Input").foregroundStyle(.secondary)
