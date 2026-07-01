@@ -91,9 +91,29 @@ class ConnectionManager(
                 coroutineScope {
                     val videoJob = launch { readVideo(video!!) }
                     val audioJob = launch { readAudio(audio!!) }
+                    
+                    val usbMonitorJob = launch {
+                        if (connectedHost != Protocol.HOST) {
+                            while (isActive) {
+                                delay(3000)
+                                try {
+                                    val s = Socket()
+                                    s.connect(InetSocketAddress(Protocol.HOST, Protocol.PORT_VIDEO), 1000)
+                                    s.close()
+                                    Log.i(TAG, "USB tunnel detected while on Wi-Fi. Forcing reconnect.")
+                                    video?.close() // Video EOF is the primary disconnect signal.
+                                    break
+                                } catch (e: Exception) {
+                                    // USB not available yet
+                                }
+                            }
+                        }
+                    }
+
                     // Video EOF is the primary disconnect signal.
                     videoJob.join()
                     audioJob.cancel()
+                    usbMonitorJob.cancel()
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "session ended: ${e.message}")
