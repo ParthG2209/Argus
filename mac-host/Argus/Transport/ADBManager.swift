@@ -32,7 +32,7 @@ final class ADBManager {
     /// Set up all three reverse tunnels. Returns true if every command
     /// succeeded.
     @discardableResult
-    func setupReverseTunnels() -> Bool {
+    func setupReverseTunnels(silent: Bool = false) -> Bool {
         guard let adb = adbPath ?? locate() else { return false }
         let ports = [ArgusPorts.video, ArgusPorts.input, ArgusPorts.audio]
         var ok = true
@@ -40,10 +40,10 @@ final class ADBManager {
             let arg = "tcp:\(port)"
             let result = run(adb, ["reverse", arg, arg])
             if result.status != 0 {
-                NSLog("[Argus] adb reverse \(arg) failed: \(result.output)")
+                if !silent { NSLog("[Argus] adb reverse \(arg) failed: \(result.output)") }
                 ok = false
             } else {
-                NSLog("[Argus] adb reverse \(arg) -> \(arg) OK")
+                if !silent { NSLog("[Argus] adb reverse \(arg) -> \(arg) OK") }
             }
         }
         return ok
