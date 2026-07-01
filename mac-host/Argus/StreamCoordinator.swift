@@ -37,6 +37,7 @@ final class StreamCoordinator {
     private var advertiser: BonjourAdvertiser?
 
     private var fpsTimer: Timer?
+    private var usbMonitorTimer: Timer?
 
     private var captureWidth = ArgusDisplaySpec.fallbackWidth
     private var captureHeight = ArgusDisplaySpec.fallbackHeight
@@ -72,7 +73,15 @@ final class StreamCoordinator {
         videoServer = video; audioServer = audioSrv; inputServer = input
 
         video.connectFrame = { ArgusHandshake.make(codec) }
-        video.onClientConnected = { [weak self] in self?.videoPipeline?.requestKeyframe() }
+        video.onClientConnected = { [weak self] isUSB in 
+            Task { @MainActor in
+                self?.state.update(isUSB: isUSB)
+                self?.encoder?.setUSBMode(isUSB)
+                self?.audioServer?.disconnectClient()
+                self?.inputServer?.disconnectClient()
+            }
+            self?.videoPipeline?.requestKeyframe() 
+        }
         input.onLine = { [weak self] line in
             Task { @MainActor in self?.handleInputLine(line) }
         }
@@ -83,6 +92,7 @@ final class StreamCoordinator {
         advertiser?.start()
         
         _ = adb.setupReverseTunnels()
+        startUSBMonitor()
 
         state.update(status: .connected)
 
@@ -214,6 +224,7 @@ final class StreamCoordinator {
 
     func disconnect() {
         fpsTimer?.invalidate(); fpsTimer = nil
+        usbMonitorTimer?.invalidate(); usbMonitorTimer = nil
         helloTimeout?.invalidate(); helloTimeout = nil
         streamingStarted = false
 
@@ -294,6 +305,20 @@ final class StreamCoordinator {
                 self.state.update(fps: encodedFps)
                 if capturedFps > 0 || encodedFps > 0 {
                     NSLog("[Argus] FPS: captured=%d  encoded=%d", capturedFps, encodedFps)
+                }
+            }
+        }
+    }
+
+    private func startUSBMonitor() {
+        usbMonitorTimer?.invalidate()
+        usbMonitorTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self else { return }
+                if self.state.status == .streaming && !self.state.isUSB {
+                    // Silently attempt to map ports. If a device was just plugged in,
+                    // this will succeed and open localhost:7175 for the tablet to ping.
+                    self.adb.setupReverseTunnels(silent: true)
                 }
             }
         }
